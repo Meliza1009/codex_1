@@ -1,7 +1,7 @@
 import "server-only";
 
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Activity, FileChange, FileExplanation, InspectedFile, PilotRun, PlanStep, Review, RunError, RunEvent, Search, Stage, StageId } from "@/lib/pilot-types";
@@ -113,12 +113,14 @@ const proposalSchema = {
 
 const reviewSchema = { type: "object", additionalProperties: false, required: ["verdict", "checks"], properties: { verdict: { type: "string", enum: ["passed", "warning"] }, checks: { type: "array", maxItems: 5, items: { type: "object", additionalProperties: false, required: ["label", "status"], properties: { label: { type: "string" }, status: { type: "string", enum: ["passed", "warning"] } } } } } } as const;
 
-async function runCodex(prompt: string) {
+async function runCodex(prompt: string, schema?: object) {
   const folder = await mkdtemp(join(tmpdir(), "codex-pilot-"));
   const output = join(folder, "answer.json");
+  const schemaPath = join(folder, "response-schema.json");
   try {
+    if (schema) await writeFile(schemaPath, JSON.stringify(schema), "utf8");
     await new Promise<void>((resolve, reject) => {
-      const child = spawn("codex", ["exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--disable", "shell_tool", "--output-last-message", output, "-"], { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+      const child = spawn("codex", ["exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--disable", "shell_tool", ...(schema ? ["--output-schema", schemaPath] : []), "--output-last-message", output, "-"], { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
       let stderr = "";
       child.stderr.on("data", (chunk) => { stderr += String(chunk); });
       child.on("error", reject);
@@ -132,10 +134,9 @@ async function runCodex(prompt: string) {
 }
 
 async function responseJson<T>(instructions: string, input: string, schema: object, name: string): Promise<T> {
-  void schema;
   void name;
   try {
-    const output = await runCodex(instructions + "\n\nReturn JSON only. Do not use Markdown fences.\n\nINPUT\n" + input);
+    const output = await runCodex(instructions + "\n\nReturn JSON only. Do not use Markdown fences.\n\nINPUT\n" + input, schema);
     return parseJson<T>(output, {} as T);
   } catch {
     fail("codex_unavailable", "Codex CLI unavailable", "Codex Pilot could not start the locally authenticated Codex CLI. Run codex login and try again.", true);
