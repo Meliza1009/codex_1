@@ -13,6 +13,11 @@ npm run dev
 
 Open `http://localhost:3000`. Add `GITHUB_TOKEN` to `.env.local` if GitHub’s unauthenticated API limit becomes restrictive.
 
+## Hosting modes
+
+- **Local live demo:** leave `CODEX_PILOT_LIVE_RUNS` unset (or set it to `true`), run `codex login`, then start the app with `npm run dev`.
+- **Hosted sample preview:** set both `CODEX_PILOT_LIVE_RUNS=false` and `NEXT_PUBLIC_CODEX_PILOT_LIVE_RUNS=false` at build time. The page clearly labels its sample run and refuses submissions instead of attempting to access a Codex CLI session that the host does not have.
+
 ## Boundaries
 
 - Public GitHub issues only; pull requests and private repositories are rejected.

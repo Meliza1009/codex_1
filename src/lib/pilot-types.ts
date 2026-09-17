@@ -27,7 +27,7 @@ export type PilotRun = {
   review: Review;
   confidence: "high" | "medium" | "low";
   limitations: string[];
-  metrics: { elapsedMs: number; filesInspected: number; searches: number; filesChanged: number; additions: number; deletions: number };
+  metrics: { elapsedMs: number; filesIndexed: number; filesInspected: number; searches: number; filesChanged: number; additions: number; deletions: number };
   patch: string;
 };
 

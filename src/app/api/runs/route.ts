@@ -14,6 +14,23 @@ export async function POST(request: Request) {
     return Response.json({ error: error instanceof Error ? error.message : "Enter a valid GitHub issue URL." }, { status: 400 });
   }
   const encoder = new TextEncoder();
+  if (process.env.CODEX_PILOT_LIVE_RUNS === "false") {
+    const hostedPreviewError: RunEvent = {
+      type: "failed",
+      error: {
+        code: "hosted_preview",
+        title: "Live runs are available in the local demo",
+        message: "This hosted preview intentionally shows a sample run. Start Codex Pilot on the Codex-authenticated demo machine to investigate a public GitHub issue.",
+      },
+    };
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(hostedPreviewError)}\n\n`));
+        controller.close();
+      },
+    });
+    return new Response(stream, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform" } });
+  }
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const emit = (event: RunEvent) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));

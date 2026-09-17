@@ -25,8 +25,8 @@ const IGNORED_PATH = /(^|\/)(node_modules|dist|build|\.next|coverage|vendor|gene
 const stageLabels: Record<StageId, string> = {
   understanding: "Understanding issue",
   exploring: "Exploring repository",
-  planning: "Forming plan",
-  writing: "Writing patch",
+  planning: "Planning",
+  writing: "Generating patch",
   reviewing: "Reviewing patch",
 };
 
@@ -72,8 +72,12 @@ function words(...values: string[]) {
     .slice(0, 12);
 }
 
+function candidateSourceFiles(tree: TreeItem[]) {
+  return tree.filter((item) => item.type === "blob" && (item.size ?? 0) <= MAX_FILE_BYTES && !IGNORED_PATH.test(item.path));
+}
+
 function candidatePaths(tree: TreeItem[], terms: string[]) {
-  const usable = tree.filter((item) => item.type === "blob" && (item.size ?? 0) <= MAX_FILE_BYTES && !IGNORED_PATH.test(item.path));
+  const usable = candidateSourceFiles(tree);
   return usable.map((item) => {
     const matches = terms.filter((term) => item.path.toLowerCase().includes(term));
     const score = matches.length * 4 + (/\.(ts|tsx|js|jsx|py|go|rb|java|rs|php|cs)$/i.test(item.path) ? 1 : 0);
@@ -162,7 +166,7 @@ export async function streamPilotRun(issueUrl: string, emit: (event: RunEvent) =
     setStage("exploring", "investigating");
     const treeResponse = await github<{ tree: TreeItem[]; truncated: boolean }>(`/repos/${encoded}/git/trees/${encodeURIComponent(repo.default_branch)}?recursive=1`);
     if (treeResponse.truncated || treeResponse.tree.length > MAX_TREE_ENTRIES) fail("repository_too_large", "Repository too large", "Codex Pilot found more source entries than this prototype can explore safely.");
-    const fileCount = treeResponse.tree.filter((item) => item.type === "blob").length; addActivity("exploring", "Loaded repository tree", `Indexed ${fileCount} files from the ${repo.default_branch} branch.`);
+    const filesIndexed = candidateSourceFiles(treeResponse.tree).length; addActivity("exploring", "Scanned repository tree", `Scanned repository tree: ${filesIndexed} candidate source files on ${repo.default_branch}.`);
     const terms = words(issue.title, issue.body ?? "", ...comments.map((comment) => comment.body)); const rankedPaths = candidatePaths(treeResponse.tree, terms);
     if (!rankedPaths.length) fail("unsupported_files", "No supported source files found", "The repository has no safely inspectable source files for this issue.");
     const search: Search = { query: terms.slice(0, 3).join(" ") || "issue context", matches: rankedPaths.filter((item) => item.score > 0).length, detail: `Ranked ${rankedPaths.length} relevant files from issue language and paths.` };
@@ -184,14 +188,14 @@ export async function streamPilotRun(issueUrl: string, emit: (event: RunEvent) =
     const edits = (proposal.edits ?? []).filter((edit) => typeof edit.path === "string" && typeof edit.content === "string" && allowed.has(edit.path) && edit.content.length <= MAX_FILE_BYTES && edit.content !== allowed.get(edit.path)).slice(0, MAX_CHANGED_FILES);
     if (!edits.length || proposal.confidence === "low") fail("no_confident_patch", "Unable to produce a confident patch", "The issue needs evidence beyond the files Codex Pilot could safely inspect. No patch was generated.");
     const files: FileChange[] = edits.map((edit) => { const before = allowed.get(edit.path!)!; const after = edit.content!; return { path: edit.path!, additions: countLines(after), deletions: countLines(before), diff: wholeFileDiff(edit.path!, before, after), reason: edit.reason || "This focused edit addresses the issue evidence." }; });
-    files.forEach((file) => addActivity("writing", `Prepared ${file.path}`, `Generated a proposed unified diff (+${file.additions} −${file.deletions}).`)); const patch = files.map((file) => file.diff).join("\n"); setStage("writing", "completed");
+    files.forEach((file) => addActivity("writing", `Modified ${file.path}`, `Proposed edit (+${file.additions} −${file.deletions}).`)); const patch = files.map((file) => file.diff).join("\n"); addActivity("writing", "Generated unified diff", `Built a reviewable patch from ${files.length} inspected source file${files.length === 1 ? "" : "s"}.`); setStage("writing", "completed");
     setStage("reviewing", "investigating");
     const reviewResult = await responseJson<ReviewerResponse>("You are the patch reviewer for Codex Pilot. Review only the supplied issue, inspected files, and proposed patch. Do not claim that tests ran. Return a passed verdict only when requirements appear covered, changes stay in scope, and interfaces look structurally consistent. Keep checks concise.", `ISSUE\n#${issue.number}: ${issue.title}\n${issue.body ?? "(No description)"}\n\nPATCH\n${patch}\n\nINSPECTED PATHS\n${candidates.map((candidate) => candidate.path).join("\n")}`, reviewSchema, "pilot_review");
     const review: Review = { status: reviewResult.verdict === "warning" ? "warning" : "passed", checks: (reviewResult.checks ?? []).slice(0, 5).map((check) => ({ label: check.label || "Patch reviewed", status: check.status === "warning" ? "warning" : "passed" })) };
     if (!review.checks.length) review.checks = [{ label: "Changed files were inspected before editing", status: "passed" }, { label: "Tests were not executed", status: "warning" }]; review.checks.forEach((check) => addActivity("reviewing", check.label, check.status === "passed" ? "Reviewer check passed." : "Manual follow-up is recommended.", check.status === "passed" ? "completed" : "warning")); setStage("reviewing", review.status === "passed" ? "completed" : "warning");
     const explanations: FileExplanation[] = files.map((file) => { const explanation = (proposal.explanations ?? []).find((item) => item.path === file.path); return { path: file.path, explanation: explanation?.explanation || file.reason, coverage: explanation?.coverage?.slice(0, 3) ?? ["Focused change proposed from inspected evidence"] }; });
     const additions = files.reduce((sum, file) => sum + file.additions, 0); const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
-    const run: PilotRun = { issue: issueInfo, repository, source: "live", status: review.status === "passed" ? "completed" : "needs-review", summary: proposal.summary || "Codex Pilot proposed a focused patch from the inspected repository evidence.", stages, activity, searches, inspectedFiles, plan, files, explanations, review, confidence: proposal.confidence === "high" ? "high" : "medium", limitations: [...new Set([...(proposal.limitations ?? []), "Repository code was not executed.", "Automated tests were not run."])].slice(0, 4), metrics: { elapsedMs: elapsed(), filesInspected: inspectedFiles.length, searches: searches.length, filesChanged: files.length, additions, deletions }, patch };
+    const run: PilotRun = { issue: issueInfo, repository, source: "live", status: review.status === "passed" ? "completed" : "needs-review", summary: proposal.summary || "Codex Pilot proposed a focused patch from the inspected repository evidence.", stages, activity, searches, inspectedFiles, plan, files, explanations, review, confidence: proposal.confidence === "high" ? "high" : "medium", limitations: [...new Set([...(proposal.limitations ?? []), "Repository code was not executed.", "Automated tests were not run."])].slice(0, 4), metrics: { elapsedMs: elapsed(), filesIndexed, filesInspected: inspectedFiles.length, searches: searches.length, filesChanged: files.length, additions, deletions }, patch };
     emit({ type: "completed", run });
   } catch (error) { emit({ type: "failed", error: toRunError(error) }); }
 }
