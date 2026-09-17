@@ -1,6 +1,6 @@
 # Codex Pilot
 
-Paste a public GitHub issue and receive a focused, reviewable patch proposal. Codex Pilot loads the issue, comments, repository tree, and a small set of relevant source files. It asks the locally authenticated Codex CLI to propose structured edits, then builds the downloadable unified diff itself.
+Paste a public GitHub issue and receive a focused, reviewable patch proposal. Codex Pilot visibly loads the issue, comments, repository tree, and a small set of relevant source files. It streams observable investigation milestones, asks the locally authenticated Codex CLI for structured edits, then runs a dedicated patch-review pass before building a downloadable unified diff.
 
 ## Run locally
 
@@ -17,8 +17,8 @@ Open `http://localhost:3000`. Add `GITHUB_TOKEN` to `.env.local` if GitHub’s u
 
 - Public GitHub issues only; pull requests and private repositories are rejected.
 - Repositories are read through GitHub’s REST API, capped at 25 MB and 10,000 files.
-- Codex runs with a read-only sandbox and its shell tool disabled. It receives only the issue, comments, and selected file contents.
-- The agent may replace content only in a file it inspected. Codex Pilot generates the diff from those replacements.
+- The locally authenticated Codex CLI receives only the issue, comments, and selected file contents. It runs in an ephemeral, read-only sandbox with its shell tool disabled.
+- The agent may replace content only in a file it inspected. Codex Pilot validates the replacements and generates the diff itself.
 - Target repositories are never cloned, executed, tested, or modified.
 
-If Codex cannot return a supported edit, the app retains the investigation and clearly marks the result as needing review instead of offering an empty patch.
+If Codex cannot return a supported, confident edit, the app clearly refuses to offer an empty patch. GitHub rate limits, private or missing repositories, closed issues, unsupported files, and large repositories receive dedicated failure states.
