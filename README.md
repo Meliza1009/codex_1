@@ -1,36 +1,24 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Codex Pilot
 
-## Getting Started
+Paste a public GitHub issue and receive a focused, reviewable patch proposal. Codex Pilot loads the issue, comments, repository tree, and a small set of relevant source files. It asks the locally authenticated Codex CLI to propose structured edits, then builds the downloadable unified diff itself.
 
-First, run the development server:
+## Run locally
 
-```bash
+```powershell
+npm install
+Copy-Item .env.example .env.local
+codex login
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000`. Add `GITHUB_TOKEN` to `.env.local` if GitHub’s unauthenticated API limit becomes restrictive.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Boundaries
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- Public GitHub issues only; pull requests and private repositories are rejected.
+- Repositories are read through GitHub’s REST API, capped at 25 MB and 10,000 files.
+- Codex runs with a read-only sandbox and its shell tool disabled. It receives only the issue, comments, and selected file contents.
+- The agent may replace content only in a file it inspected. Codex Pilot generates the diff from those replacements.
+- Target repositories are never cloned, executed, tested, or modified.
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+If Codex cannot return a supported edit, the app retains the investigation and clearly marks the result as needing review instead of offering an empty patch.
