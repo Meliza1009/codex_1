@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import type { Activity, InspectedFile, PilotRun, RunError, RunEvent } from "@/lib/pilot-types";
 
@@ -10,7 +10,9 @@ const examples = [
   { label: "clsx #112", url: "https://github.com/lukeed/clsx/issues/112" },
 ];
 
-const hostedPreview = process.env.NEXT_PUBLIC_CODEX_PILOT_LIVE_RUNS === "false";
+const configuredHostedPreview = process.env.NEXT_PUBLIC_CODEX_PILOT_LIVE_RUNS === "false";
+const subscribeToLocation = () => () => {};
+const hostedPreviewFromLocation = () => configuredHostedPreview || window.location.hostname.endsWith(".vercel.app");
 
 const sample: PilotRun = {
   issue: { number: 123, title: "Dark mode resets after page refresh", repository: "acme/astro-ui", url: "https://github.com/acme/astro-ui/issues/123" },
@@ -63,6 +65,7 @@ export default function Home() {
   const [error, setError] = useState<RunError | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [how, setHow] = useState(false);
+  const hostedPreview = useSyncExternalStore(subscribeToLocation, hostedPreviewFromLocation, () => configuredHostedPreview);
   const active = (run || sample) as PilotRun;
   const activeStage = active.stages.find((stage) => stage.status === "investigating");
 

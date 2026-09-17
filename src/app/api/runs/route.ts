@@ -14,7 +14,7 @@ export async function POST(request: Request) {
     return Response.json({ error: error instanceof Error ? error.message : "Enter a valid GitHub issue URL." }, { status: 400 });
   }
   const encoder = new TextEncoder();
-  if (process.env.CODEX_PILOT_LIVE_RUNS === "false") {
+  if (process.env.CODEX_PILOT_LIVE_RUNS === "false" || process.env.VERCEL === "1") {
     const hostedPreviewError: RunEvent = {
       type: "failed",
       error: {
