@@ -164,11 +164,11 @@ export function extractStructuredRequirements(
     let inReqSection = false;
     for (const line of lines) {
       const trimmed = line.trim();
-      if (/^#{1,4}\s*(requirements|acceptance criteria|tasks|specification)/i.test(trimmed)) {
+      if (/^#{1,6}[^\w\n]*(requirements|acceptance criteria|tasks|specification)/i.test(trimmed)) {
         inReqSection = true;
         continue;
       }
-      if (inReqSection && /^#{1,4}\s+/.test(trimmed)) {
+      if (inReqSection && /^#{1,6}(\s+|$)/.test(trimmed)) {
         inReqSection = false;
         continue;
       }
@@ -194,7 +194,12 @@ export function extractStructuredRequirements(
   }
 
   if (bodyBullets.length > 0) {
-    for (const bullet of bodyBullets.slice(0, 8)) {
+    const seen = new Set<string>();
+    for (const bullet of bodyBullets) {
+      const norm = bullet.toLowerCase().replace(/[`'".,]/g, "").trim();
+      if (seen.has(norm)) continue;
+      seen.add(norm);
+      if (list.some((r) => r.text.toLowerCase().replace(/[`'".,]/g, "").trim() === norm)) continue;
       const isTest = /test|spec|assert|coverage/i.test(bullet);
       const isPreserve = /preserve|backward|compatibility|avoid mutating|without changing|existing/i.test(bullet);
       const isDocs = /docs?|jsdoc|example|readme/i.test(bullet);
@@ -205,6 +210,7 @@ export function extractStructuredRequirements(
         text: bullet,
         status: "unmapped",
       });
+      if (list.length >= 12) break;
     }
   } else {
     if (analysis.expectedBehavior) {
