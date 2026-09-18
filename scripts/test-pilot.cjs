@@ -39,12 +39,12 @@ async function scenario(name, options = {}) {
         plans++;
         if (options.cumulative) { assert.match(prompt, /Always returns true/); assert.match(prompt, /Referenced rule/); }
         const invalid = options.invalidPlan || (options.repairPlan && plans === 1);
-        if (plans === 2) assert.match(prompt, /File was not inspected: invented.ts/);
-        const file = invalid ? 'invented.ts' : options.pathAlias ? './src/validator.ts' : options.unsummarized ? 'src/follow0.ts' : 'src/validator.ts';
+        if (plans === 2 && (options.invalidPlan || options.repairPlan)) assert.match(prompt, /File was not inspected: invented.ts/);
+        const file = invalid ? 'invented.ts' : options.pathAlias ? './src/validator.ts' : options.plannerBackroute ? 'src/follow20.ts' : options.unsummarized ? 'src/follow0.ts' : 'src/validator.ts';
         assert.match(prompt, /filesAvailableToChange/);
         return JSON.stringify({ goal: 'Reject empty names', filesAllowedToChange: [file], steps: [{ file, action: 'Reject empty strings', reason: 'Match requested behavior' }] });
       }
-      if (schema.required.includes('changes')) { coderCalls++; if (coderCalls === 2) { assert.match(prompt, /REVIEWER FEEDBACK/); assert.match(prompt, /PREVIOUS PROPOSED CONTENTS/); } return JSON.stringify({ changes: [{ path: options.badPath ? 'src/secret.ts' : options.unsummarized ? 'src/follow0.ts' : 'src/validator.ts', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'Reject empty names' }] }); }
+      if (schema.required.includes('changes')) { coderCalls++; if (coderCalls === 2) { assert.match(prompt, /REVIEWER FEEDBACK/); assert.match(prompt, /PREVIOUS PROPOSED CONTENTS/); } return JSON.stringify({ changes: [{ path: options.badPath ? 'src/secret.ts' : options.plannerBackroute ? 'src/follow20.ts' : options.unsummarized ? 'src/follow0.ts' : 'src/validator.ts', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'Reject empty names' }] }); }
       reviews++;
       if (options.firstReviewRefuses) {
         return JSON.stringify({ verdict: 'refuse', requirementsCovered: false, unrelatedChanges: false, likelySyntaxRisk: false, apiBreakageRisk: false, evidenceSupported: true, missingRequirements: ['Empty strings must be rejected'], feedback: ['Direct refusal on first review'] });
@@ -88,6 +88,10 @@ async function scenario(name, options = {}) {
     if (options.revise || options.reviewFails) { assert.equal(reviews, 2); assert.equal(coderCalls, 2); }
     if (options.firstReviewRefuses) { assert.equal(reviews, 1); assert.equal(coderCalls, 1); }
     if (options.outOfScope) assert.equal(run.refusal.code, 'OUT_OF_SCOPE_HARDWARE');
+    if (options.plannerBackroute) {
+      assert.ok(run.inspectedFiles.some((f) => f.path === 'src/follow20.ts'));
+      assert.ok(run.activity.some((a) => a.action === 'Back-routing to exploration'));
+    }
   }
   console.log(`PASS ${name}`);
 }
@@ -108,4 +112,5 @@ async function scenario(name, options = {}) {
   await scenario('relative path spelling normalized', { pathAlias: true });
   await scenario('invalid plan repaired using exact validation feedback', { repairPlan: true });
   await scenario('invented plan paths fail with specific diagnostics', { invalidPlan: true });
+  await scenario('planner back-routes to exploration for uninspected manifest file', { plannerBackroute: true });
 })().catch((error) => { console.error(error); process.exitCode = 1; });

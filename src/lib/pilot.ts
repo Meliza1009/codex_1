@@ -273,19 +273,22 @@ async function exploreRepository(state: AgentRunState, encoded: string, client: 
 }
 
 
-async function createPlan(state: AgentRunState, codex: CodexRunner, tools: ReturnType<typeof emitters>, emit: (event: RunEvent) => void) {
+async function createPlan(state: AgentRunState, encoded: string, client: GithubClient, codex: CodexRunner, tools: ReturnType<typeof emitters>, emit: (event: RunEvent) => void) {
   tools.stage("planning", "investigating");
-  const input = {
-    issueAnalysis: state.analysis, evidence: state.evidence?.evidence,
-    // Exact inspected content is evidence even if the gate's compact summary omitted this file.
-    inspectedFiles: state.inspectedFiles, contents: Object.fromEntries(state.originals),
-    filesAvailableToChange: [...state.originals.keys()],
-  };
   let errors: string[] = [];
   let previousPlan: PlannerResponse | undefined;
+  let routedBack = false;
+
   for (let attempt = 0; attempt < 2; attempt++) {
+    const input = {
+      issueAnalysis: state.analysis, evidence: state.evidence?.evidence,
+      // Exact inspected content is evidence even if the gate's compact summary omitted this file.
+      inspectedFiles: state.inspectedFiles, contents: Object.fromEntries(state.originals),
+      filesAvailableToChange: [...state.originals.keys()],
+    };
+
     const result = await responseJson<PlannerResponse>(codex,
-      "Create a minimal plan grounded in issue requirements, validated findings and exact inspected contents. Each step needs file, action and reason. Use exact repository-relative paths from filesAvailableToChange. filesAllowedToChange must contain all and only step files. Do not invent files. Reading tests is allowed and proposed test source changes are allowed; never propose executing tests or the repository. Correct validationErrors if provided.",
+      "You are the implementation planner for Codex Pilot. The evidence gate has determined that evidence is ready_to_patch. Ground your plan in the validated findings and exact inspected contents. Each step needs file, action and reason. Use exact repository-relative paths from filesAvailableToChange. filesAllowedToChange must contain all and only step files. Only block if there is a concrete contradiction between the issue requirements and repository facts. Reading tests is allowed and proposed test source changes are allowed; never propose executing tests or the repository. Correct validationErrors if provided.",
       JSON.stringify({ ...input, previousPlan, validationErrors: errors }), plannerSchema);
     const steps = result.steps.map((step) => ({ ...step, file: canonicalPath(step.file) }));
     const allowed = new Set(result.filesAllowedToChange.map(canonicalPath));
@@ -296,6 +299,22 @@ async function createPlan(state: AgentRunState, codex: CodexRunner, tools: Retur
       ...[...allowed].filter((path) => !stepPaths.has(path)).map((path) => `Allowed file has no plan step: ${path}`),
     ];
     if (errors.length) {
+      // If planner referenced repository files that were not yet inspected, back-route to targeted exploration once
+      const missingRepoFiles = [...new Set([...allowed, ...stepPaths])].filter((path) => !state.originals.has(path) && state.manifest.some((file) => file.path === path));
+      if (!routedBack && missingRepoFiles.length > 0 && state.inspectedFiles.length < MAX_FILES_INSPECTED) {
+        routedBack = true;
+        tools.activity("planning", "Back-routing to exploration", `Missing evidence for plan: inspecting ${missingRepoFiles.slice(0, MAX_FILES_PER_ROUND).join(", ")}.`);
+        tools.stage("exploring", "investigating");
+        await inspectFiles(state, missingRepoFiles.slice(0, MAX_FILES_PER_ROUND), encoded, client, tools, emit);
+        await evaluateEvidence(state, codex, tools, emit);
+        tools.stage("exploring", "completed");
+        tools.stage("planning", "investigating");
+        attempt = -1;
+        previousPlan = undefined;
+        errors = [];
+        continue;
+      }
+
       previousPlan = result;
       tools.activity("planning", attempt === 0 ? "Repairing plan mapping" : "Plan mapping failed", errors.join("; "), "warning");
       continue;
@@ -305,7 +324,7 @@ async function createPlan(state: AgentRunState, codex: CodexRunner, tools: Retur
     tools.activity("planning", "Created implementation plan", `${state.plan.length} steps mapped to ${allowed.size} inspected files.`);
     tools.stage("planning", "completed"); return;
   }
-  fail("PLAN_SCOPE_INVALID", "Plan could not be mapped to inspected files", errors.join("; "), true);
+  fail("PLAN_SCOPE_INVALID", "Planning stopped", errors.join("; "), true);
 }
 
 async function generatePatch(state: AgentRunState, codex: CodexRunner, tools: ReturnType<typeof emitters>, emit: (event: RunEvent) => void, feedback?: string) {
@@ -315,7 +334,10 @@ async function generatePatch(state: AgentRunState, codex: CodexRunner, tools: Re
   emit({ type: "plan", plan: state.plan });
   const approved = new Set(state.plan.flatMap((step) => step.paths ?? []));
   const originalContents = [...state.originals].filter(([path]) => approved.has(path)).map(([path, content]) => `--- ${path}\n${content}`).join("\n\n");
-  const proposal = await responseJson<CoderResponse>(codex, "You are the coder for Codex Pilot. Return changes with path, updatedContent and explanation containing minimal updated full-file contents only for the approved files provided. Preserve APIs unless the issue requires a change. Do not create files, run code, or claim tests. Do not fabricate missing repository knowledge.", `${compactIssue(state)}\n\nEVIDENCE PACKAGE\n${evidenceSummary(state.evidence)}\n\nPLAN\n${state.plan.map((step) => `${step.title}: ${step.detail}\nPaths: ${step.paths?.join(", ")}`).join("\n\n")}\n\nAPPROVED ORIGINAL FILES\n${originalContents}${feedback ? `\n\nPREVIOUS PROPOSED CONTENTS\n${JSON.stringify(Object.fromEntries(state.proposedContents))}\n\nREVIEWER FEEDBACK\n${feedback}\nReturn the complete revised change set, retaining correct prior changes.` : ""}`, coderSchema);
+  const coderInstructions = feedback
+    ? "You are the coder for Codex Pilot revising a proposed patch based on reviewer feedback. Return changes with path, updatedContent and explanation containing minimal updated full-file contents ONLY for the approved files provided. Strictly modify only the files approved in the plan. Do not touch documentation (such as README.md, docs, or changelogs) or unrelated files unless the issue explicitly demands documentation changes. Address reviewer feedback directly while preserving all already-correct changes. Preserve existing public APIs and backward compatibility unless the issue requires a change. Do not create files, run code, or claim tests."
+    : "You are the coder for Codex Pilot. Return changes with path, updatedContent and explanation containing minimal updated full-file contents ONLY for the approved files provided. Strictly modify only the files approved in the plan. Do not touch documentation (e.g. README.md) or unrelated files unless the issue explicitly requires documentation changes. Preserve existing public APIs unless the issue requires a change. Do not create files, run code, or claim tests. Do not fabricate missing repository knowledge.";
+  const proposal = await responseJson<CoderResponse>(codex, coderInstructions, `${compactIssue(state)}\n\nEVIDENCE PACKAGE\n${evidenceSummary(state.evidence)}\n\nPLAN\n${state.plan.map((step) => `${step.title}: ${step.detail}\nPaths: ${step.paths?.join(", ")}`).join("\n\n")}\n\nAPPROVED ORIGINAL FILES\n${originalContents}${feedback ? `\n\nPREVIOUS PROPOSED CONTENTS\n${JSON.stringify(Object.fromEntries(state.proposedContents))}\n\nREVIEWER FEEDBACK\n${feedback}\nReturn the complete revised change set, retaining correct prior changes.` : ""}`, coderSchema);
   const built = buildFiles(proposal, state.originals, approved);
   if (!("files" in built) || !built.files) return { ok: false, reason: built.reason || "The coder could not produce a safe patch." };
   state.files = built.files;
@@ -416,18 +438,53 @@ function runFor(state: AgentRunState, elapsed: number, status: PilotRun["status"
   };
 }
 
-function refuse(state: AgentRunState, reason: string, suggestedNextStep: string, tools: ReturnType<typeof emitters>, emit: (event: RunEvent) => void, kind: "out_of_scope" | "budget_exhausted" | "insufficient_evidence" = "insufficient_evidence") {
-  state.summary = kind === "budget_exhausted"
-    ? "Exploration budget exhausted before Codex Pilot could form a trustworthy patch."
-    : kind === "out_of_scope"
-    ? "This issue requires a capability outside Codex Pilot's allowed boundaries."
-    : state.review
-    ? "Codex Pilot proposed a patch, but the reviewer identified unresolved concerns."
-    : "Codex Pilot stopped because the inspected evidence was not strong enough for a trustworthy patch.";
+function refuse(
+  state: AgentRunState,
+  reason: string,
+  suggestedNextStep: string,
+  tools: ReturnType<typeof emitters>,
+  emit: (event: RunEvent) => void,
+  kind: "out_of_scope" | "budget_exhausted" | "insufficient_evidence" | "planning_failed" | "patch_generation_failed" = "insufficient_evidence",
+  stageId?: StageId,
+  title?: string
+) {
+  const resolvedTitle =
+    title ??
+    (kind === "budget_exhausted" || kind === "out_of_scope"
+      ? "Investigation stopped"
+      : kind === "planning_failed"
+      ? "Planning stopped"
+      : kind === "patch_generation_failed"
+      ? "Patch generation failed"
+      : state.review
+      ? "Patch not approved"
+      : "Investigation stopped");
 
-  const stageToMark: StageId = state.review ? "reviewing" : state.stages.some((s) => (s.id === "writing" || s.id === "revising") && s.status !== "pending") ? "writing" : "evidence";
-  tools.activity(stageToMark, kind === "budget_exhausted" ? "Exploration budget exhausted" : kind === "out_of_scope" ? "Out of scope" : state.review ? "Patch review refused" : "Investigation stopped", reason, "warning");
-  if (!state.stages.some((stage) => ["planning", "writing", "reviewing", "revising"].includes(stage.id) && stage.status !== "pending")) tools.stage("evidence", "warning");
+  state.summary =
+    kind === "budget_exhausted"
+      ? "Exploration budget exhausted before Codex Pilot could form a trustworthy patch."
+      : kind === "out_of_scope"
+      ? "This issue requires a capability outside Codex Pilot's allowed boundaries."
+      : kind === "planning_failed"
+      ? "Planning stopped because the proposed changes could not be mapped to verified inspected files."
+      : kind === "patch_generation_failed"
+      ? "Patch generation failed to produce a valid, reviewable diff."
+      : state.review
+      ? "Codex Pilot proposed a patch, but the reviewer identified unresolved concerns."
+      : "Codex Pilot stopped because the inspected evidence was not strong enough for a trustworthy patch.";
+
+  const stageToMark: StageId =
+    stageId ??
+    (state.review
+      ? "reviewing"
+      : state.stages.some((s) => (s.id === "writing" || s.id === "revising") && s.status !== "pending")
+      ? "writing"
+      : state.stages.some((s) => s.id === "planning" && s.status !== "pending")
+      ? "planning"
+      : "evidence");
+
+  tools.activity(stageToMark, resolvedTitle, reason, "warning");
+  tools.stage(stageToMark, "warning");
 
   finishStages(state, tools, false);
 
@@ -436,15 +493,29 @@ function refuse(state: AgentRunState, reason: string, suggestedNextStep: string,
     state.explanations = [];
   }
 
+  const code =
+    kind === "budget_exhausted"
+      ? "BUDGET_EXHAUSTED"
+      : kind === "out_of_scope"
+      ? `OUT_OF_SCOPE_${state.evidence?.requiredCapability?.toUpperCase()}`
+      : kind === "planning_failed"
+      ? "PLAN_SCOPE_INVALID"
+      : kind === "patch_generation_failed"
+      ? "PATCH_GENERATION_FAILED"
+      : state.review
+      ? "PATCH_REVIEW_FAILED"
+      : "NO_IMPLEMENTATION_FOUND";
+
   emit({
     type: "completed",
     run: runFor(state, tools.elapsed(), "refused", {
       kind,
+      title: resolvedTitle,
       reason,
       suggestedNextStep,
-      code: kind === "budget_exhausted" ? "BUDGET_EXHAUSTED" : kind === "out_of_scope" ? `OUT_OF_SCOPE_${state.evidence?.requiredCapability?.toUpperCase()}` : state.review ? "PATCH_REVIEW_FAILED" : "NO_IMPLEMENTATION_FOUND",
-      missingEvidence: state.evidence?.missingEvidence
-    })
+      code,
+      missingEvidence: state.evidence?.missingEvidence,
+    }),
   });
 }
 
@@ -458,9 +529,37 @@ function finishStages(state: AgentRunState, tools: ReturnType<typeof emitters>, 
 export async function streamPilotRun(issueUrl: string, emit: (event: RunEvent) => void, dependencies: PilotDependencies = {}) {
   const state = createState(); const client = dependencies.github ?? github; const codex = dependencies.runCodex ?? runCodex; const tools = emitters(state, emit, Date.now());
   try {
-    const { encoded } = await understandIssue(state, issueUrl, client, emit, tools); state.analysis = await responseJson<IssueAnalysis>(codex, "Classify this GitHub issue and extract expected versus observed behavior, exact symbols, paths, errors, evidence surfaces, reproduction details, approaches and constraints. OWNER, MEMBER and COLLABORATOR comments are maintainer clarifications; other comments are unverified proposals. Do not invent facts, paths, or maintainer statements. Use empty arrays for absent information.", compactIssue(state), analysisSchema); tools.activity("understanding", "Classified issue", state.analysis.kinds.join(", ") + ": " + state.analysis.summary); await scanRepository(state, encoded, client, tools); const exploration = await exploreRepository(state, encoded, client, codex, tools, emit); if (exploration.decision !== "ready_to_patch") return refuse(state, exploration.reason!, exploration.next!, tools, emit, exploration.decision === "out_of_scope" ? "out_of_scope" : "budget_exhausted");
-    await createPlan(state, codex, tools, emit);
-    const initial = await generatePatch(state, codex, tools, emit); if (!initial.ok) return refuse(state, initial.reason!, "Inspect additional source files or refine the issue requirements.", tools, emit);
+    const { encoded } = await understandIssue(state, issueUrl, client, emit, tools);
+    state.analysis = await responseJson<IssueAnalysis>(codex, "Classify this GitHub issue and extract expected versus observed behavior, exact symbols, paths, errors, evidence surfaces, reproduction details, approaches and constraints. OWNER, MEMBER and COLLABORATOR comments are maintainer clarifications; other comments are unverified proposals. Do not invent facts, paths, or maintainer statements. Use empty arrays for absent information.", compactIssue(state), analysisSchema);
+    tools.activity("understanding", "Classified issue", state.analysis.kinds.join(", ") + ": " + state.analysis.summary);
+    await scanRepository(state, encoded, client, tools);
+    const exploration = await exploreRepository(state, encoded, client, codex, tools, emit);
+    if (exploration.decision !== "ready_to_patch") {
+      return refuse(
+        state,
+        exploration.reason!,
+        exploration.next!,
+        tools,
+        emit,
+        exploration.decision === "out_of_scope" ? "out_of_scope" : "budget_exhausted",
+        "evidence",
+        "Investigation stopped"
+      );
+    }
+    await createPlan(state, encoded, client, codex, tools, emit);
+    const initial = await generatePatch(state, codex, tools, emit);
+    if (!initial.ok) {
+      return refuse(
+        state,
+        initial.reason!,
+        "Inspect additional source files or refine the issue requirements.",
+        tools,
+        emit,
+        "patch_generation_failed",
+        "writing",
+        "Patch generation failed"
+      );
+    }
     let verdict = await reviewPatch(state, codex, tools);
     if (verdict === "revise") {
       state.revisionCount = 1;
@@ -469,13 +568,33 @@ export async function streamPilotRun(issueUrl: string, emit: (event: RunEvent) =
       tools.stage("revising", "investigating");
       tools.activity("revising", "Applying reviewer feedback", "Revising only the already approved files.");
       const revision = await generatePatch(state, codex, tools, emit, state.review?.feedback?.join(" "));
-      if (!revision.ok) return refuse(state, revision.reason!, "Review the proposed change manually.", tools, emit);
+      if (!revision.ok) {
+        return refuse(
+          state,
+          revision.reason!,
+          "Review the proposed change manually.",
+          tools,
+          emit,
+          "patch_generation_failed",
+          "revising",
+          "Patch generation failed"
+        );
+      }
       tools.stage("revising", "completed");
       verdict = await reviewPatch(state, codex, tools);
     }
     if (verdict !== "approve") {
       tools.stage("reviewing", "failed");
-      return refuse(state, state.review?.feedback?.join(" ") || "The reviewer could not approve this patch within the allowed revision limit.", "Review the unresolved reviewer concerns against the proposed change.", tools, emit);
+      return refuse(
+        state,
+        state.review?.feedback?.join(" ") || "The reviewer could not approve this patch within the allowed revision limit.",
+        "Review the unresolved reviewer concerns against the proposed change.",
+        tools,
+        emit,
+        "insufficient_evidence",
+        "reviewing",
+        "Patch not approved"
+      );
     }
     state.finalPatch = state.files.map((file) => file.diff).join("\n");
     state.review!.checks.forEach((check) => tools.activity("reviewing", check.label, check.status === "passed" ? "Reviewer check passed." : "Manual follow-up is recommended.", check.status === "passed" ? "completed" : "warning"));
@@ -484,7 +603,27 @@ export async function streamPilotRun(issueUrl: string, emit: (event: RunEvent) =
     emit({ type: "completed", run: runFor(state, tools.elapsed(), "completed") });
   } catch (error) {
     finishStages(state, tools, false);
-    const diagnostic = toRunError(error); state.files = []; state.explanations = []; state.summary = diagnostic.message;
-    emit({ type: "failed", error: diagnostic, ...(state.issue && state.repository ? { run: runFor(state, tools.elapsed(), "refused", { kind: "insufficient_evidence", code: diagnostic.code, reason: diagnostic.message, suggestedNextStep: diagnostic.retryable ? "Retry after resolving the reported service or output error." : "Check the issue and repository details.", missingEvidence: state.evidence?.missingEvidence }) } : {}) });
+    const diagnostic = toRunError(error);
+    if (!state.patchVersions.length) {
+      state.files = [];
+      state.explanations = [];
+    }
+    state.summary = diagnostic.message;
+    emit({
+      type: "failed",
+      error: diagnostic,
+      ...(state.issue && state.repository
+        ? {
+            run: runFor(state, tools.elapsed(), "refused", {
+              kind: diagnostic.code === "PLAN_SCOPE_INVALID" ? "planning_failed" : "insufficient_evidence",
+              title: diagnostic.title,
+              code: diagnostic.code,
+              reason: diagnostic.message,
+              suggestedNextStep: diagnostic.retryable ? "Retry after resolving the reported service or output error." : "Check the issue and repository details.",
+              missingEvidence: state.evidence?.missingEvidence,
+            }),
+          }
+        : {}),
+    });
   }
 }

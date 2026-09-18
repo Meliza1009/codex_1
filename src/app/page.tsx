@@ -791,7 +791,13 @@ function PatchHeader({
         </p>
         <p className="mt-1 text-lg font-semibold text-white">
           {refused && !hasPatch ? (
-            run.refusal?.kind === "budget_exhausted" ? "Exploration budget exhausted" : run.refusal?.kind === "out_of_scope" ? "Required capability unavailable" : "Patch not approved"
+            run.refusal?.title || (
+              run.refusal?.kind === "planning_failed"
+                ? "Planning stopped"
+                : run.refusal?.kind === "patch_generation_failed"
+                ? "Patch generation failed"
+                : "Investigation stopped"
+            )
           ) : (
             <>
               {run.metrics.filesChanged || run.files.length} files modified{" "}
@@ -799,7 +805,7 @@ function PatchHeader({
               <span className="font-mono text-sm font-normal text-[#f85149]">−{run.metrics.deletions}</span>
               {refused && hasPatch && (
                 <span className="ml-2 rounded-full border border-[#d29922]/40 bg-[#d29922]/10 px-2 py-0.5 text-xs font-normal text-[#e3b341]">
-                  Review unapproved
+                  Patch not approved
                 </span>
               )}
             </>
@@ -931,13 +937,21 @@ function Diff({
   const hasPatch = Boolean(run.files.length > 0 || versions.length > 0);
 
   if (run.status === "refused" && !hasPatch) {
+    const refusalTitle = run.refusal?.title || (
+      run.refusal?.kind === "planning_failed"
+        ? "Planning stopped"
+        : run.refusal?.kind === "patch_generation_failed"
+        ? "Patch generation failed"
+        : "Investigation stopped"
+    );
+
     return (
       <div className="grid min-h-[440px] place-items-center p-6">
         <div className="max-w-xl rounded-md border border-[#d29922]/40 bg-[#d29922]/[.07] p-5">
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-[#d29922]" />
             <p className="font-mono text-[11px] uppercase tracking-[.14em] text-[#e3b341]">
-              Safe Refusal — No Patch Proposed
+              Safe Refusal — {refusalTitle}
             </p>
           </div>
           <p className="mt-2 text-xs text-[#8b949e]">
@@ -984,7 +998,7 @@ function Diff({
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-[#d29922]" />
             <p className="font-mono text-[11px] font-semibold uppercase tracking-[.14em] text-[#e3b341]">
-              Reviewer Refusal — Unresolved Concerns
+              Patch Not Approved — Unresolved Concerns
             </p>
           </div>
           <p className="mt-1 text-xs text-[#c9d1d9]">{run.refusal?.reason || "The reviewer found unaddressed concerns or missing requirements."}</p>
@@ -1158,7 +1172,7 @@ function ReviewPanel({ run }: { run: PilotRun }) {
                   : "border-[#d29922] bg-[#d29922]/10 text-[#e3b341]"
               }`}
             >
-              {isApproved ? "REVIEW APPROVED" : "REVIEW REFUSED"}
+              {isApproved ? "REVIEW APPROVED" : "PATCH NOT APPROVED"}
             </span>
             <span className="font-mono text-xs text-[#8b949e]">
               {review?.revisionCount ? `${review.revisionCount} revision round${review.revisionCount === 1 ? "" : "s"}` : "Initial review"}
@@ -1276,6 +1290,9 @@ function VerificationPanel({
               </span>
             ) : null}
           </div>
+          {verification && verification.verdictLabel === "PATCH FAILED VERIFICATION" && (
+            <p className="mt-1.5 font-mono text-xs font-semibold text-[#ff7b72]">Verification failed</p>
+          )}
           <p className="mt-2 text-sm text-[#c9d1d9]">
             {verification
               ? verification.summary

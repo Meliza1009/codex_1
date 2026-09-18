@@ -74,7 +74,7 @@ export type PilotRun = {
   review: Review;
   confidence: "high" | "medium" | "low";
   evidence?: EvidenceReport;
-  refusal?: { kind: "out_of_scope" | "budget_exhausted" | "insufficient_evidence"; reason: string; suggestedNextStep: string; code?: string; missingEvidence?: import("./investigation").MissingEvidence[] };
+  refusal?: { kind: "out_of_scope" | "budget_exhausted" | "insufficient_evidence" | "planning_failed" | "patch_generation_failed"; title?: string; reason: string; suggestedNextStep: string; code?: string; missingEvidence?: import("./investigation").MissingEvidence[] };
   limitations: string[];
   metrics: { elapsedMs: number; filesIndexed: number; filesInspected: number; searches: number; explorationRounds: number; revisions: number; filesChanged: number; additions: number; deletions: number };
   patch: string;
