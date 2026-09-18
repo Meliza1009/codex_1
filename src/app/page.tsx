@@ -103,6 +103,36 @@ const sample: PilotRun = {
   limitations: ["Validated in isolated temporary workspace; upstream repo untouched."],
   metrics: { elapsedMs: 14500, filesIndexed: 184, filesInspected: 3, searches: 2, explorationRounds: 2, revisions: 0, filesChanged: 2, additions: 21, deletions: 4 },
   patch: "diff --git a/src/hooks/useTheme.ts b/src/hooks/useTheme.ts\n@@ -4,10 +4,21 @@\n export function useTheme() {\n-  const [theme, setTheme] = useState<Theme>(\"light\");\n+  const [theme, setTheme] = useState<Theme>(() => {\n+    if (typeof window === \"undefined\") return \"light\";\n+    return (localStorage.getItem(\"theme\") as Theme) ?? \"light\";\n+  });\n \n-  return { theme, setTheme };\n+  const updateTheme = (nextTheme: Theme) => {\n+    setTheme(nextTheme);\n+    localStorage.setItem(\"theme\", nextTheme);\n+  };\n+\n+  return { theme, setTheme: updateTheme };\n }\n",
+  originalPatch: "diff --git a/src/hooks/useTheme.ts b/src/hooks/useTheme.ts\n@@ -4,10 +4,21 @@\n export function useTheme() {\n-  const [theme, setTheme] = useState<Theme>(\"light\");\n+  const [theme, setTheme] = useState<Theme>(() => {\n+    if (typeof window === \"undefined\") return \"light\";\n+    return (localStorage.getItem(\"theme\") as Theme) ?? \"light\";\n+  });\n \n-  return { theme, setTheme };\n+  const updateTheme = (nextTheme: Theme) => {\n+    setTheme(nextTheme);\n+    localStorage.setItem(\"theme\", nextTheme);\n+  };\n+\n+  return { theme, setTheme: updateTheme };\n }\n",
+  finalPatch: "diff --git a/src/hooks/useTheme.ts b/src/hooks/useTheme.ts\n@@ -4,10 +4,21 @@\n export function useTheme() {\n-  const [theme, setTheme] = useState<Theme>(\"light\");\n+  const [theme, setTheme] = useState<Theme>(() => {\n+    if (typeof window === \"undefined\") return \"light\";\n+    return (localStorage.getItem(\"theme\") as Theme) ?? \"light\";\n+  });\n \n-  return { theme, setTheme };\n+  const updateTheme = (nextTheme: Theme) => {\n+    setTheme(nextTheme);\n+    localStorage.setItem(\"theme\", nextTheme);\n+  };\n+\n+  return { theme, setTheme: updateTheme };\n }\n",
+  patchVersions: [
+    {
+      version: 1,
+      label: "Patch v1",
+      patch: "diff --git a/src/hooks/useTheme.ts b/src/hooks/useTheme.ts\n@@ -4,10 +4,21 @@\n export function useTheme() {\n-  const [theme, setTheme] = useState<Theme>(\"light\");\n+  const [theme, setTheme] = useState<Theme>(() => {\n+    if (typeof window === \"undefined\") return \"light\";\n+    return (localStorage.getItem(\"theme\") as Theme) ?? \"light\";\n+  });\n \n-  return { theme, setTheme };\n+  const updateTheme = (nextTheme: Theme) => {\n+    setTheme(nextTheme);\n+    localStorage.setItem(\"theme\", nextTheme);\n+  };\n+\n+  return { theme, setTheme: updateTheme };\n }\n",
+      files: [
+        {
+          path: "src/hooks/useTheme.ts",
+          additions: 14,
+          deletions: 3,
+          reason: "Initializes from browser storage and writes changes back to storage.",
+          diff: "@@ -4,10 +4,21 @@\n export function useTheme() {\n-  const [theme, setTheme] = useState<Theme>(\"light\");\n+  const [theme, setTheme] = useState<Theme>(() => {\n+    if (typeof window === \"undefined\") return \"light\";\n+    return (localStorage.getItem(\"theme\") as Theme) ?? \"light\";\n+  });\n \n-  return { theme, setTheme };\n+  const updateTheme = (nextTheme: Theme) => {\n+    setTheme(nextTheme);\n+    localStorage.setItem(\"theme\", nextTheme);\n+  };\n+\n+  return { theme, setTheme: updateTheme };\n }",
+        },
+        {
+          path: "src/providers/ThemeProvider.tsx",
+          additions: 7,
+          deletions: 1,
+          reason: "Applies the restored value after hydration.",
+          diff: "@@ -12,7 +12,13 @@\n-  useEffect(() => document.documentElement.dataset.theme = theme, [theme]);\n+  useEffect(() => {\n+    document.documentElement.dataset.theme = theme;\n+    document.documentElement.style.colorScheme = theme;\n+  }, [theme]);",
+        },
+      ],
+      explanations: [
+        { path: "src/hooks/useTheme.ts", explanation: "Stores the selected theme and initializes state from the saved browser value.", coverage: ["Theme survives refresh", "Server rendering stays safe"] },
+        { path: "src/providers/ThemeProvider.tsx", explanation: "Ensures the restored preference is applied when the provider initializes.", coverage: ["Existing provider API unchanged"] },
+      ],
+      createdMs: 7600,
+    },
+  ],
   verification: {
     result: "verified",
     verdictLabel: "VERIFIED FIX",
@@ -169,6 +199,7 @@ function liveShell(issue: PilotRun["issue"], repository: PilotRun["repository"])
     limitations: [],
     metrics: { elapsedMs: 0, filesIndexed: 0, filesInspected: 0, searches: 0, explorationRounds: 0, revisions: 0, filesChanged: 0, additions: 0, deletions: 0 },
     patch: "",
+    patchVersions: [],
   };
 }
 
@@ -194,7 +225,8 @@ function numberedDiff(diff: string) {
 export default function Home() {
   const [url, setUrl] = useState("");
   const [run, setRun] = useState<Partial<PilotRun> | null>(null);
-  const [tab, setTab] = useState<"diff" | "plan" | "explanation" | "verification">("diff");
+  const [tab, setTab] = useState<"diff" | "plan" | "explanation" | "review" | "verification">("diff");
+  const [selectedVersion, setSelectedVersion] = useState<number | undefined>(undefined);
   const [fileIndex, setFileIndex] = useState(0);
   const [loading, setLoading] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -616,7 +648,7 @@ export default function Home() {
             />
 
             <div className="flex flex-wrap gap-5 border-b border-[#30363d] px-4">
-              {(["diff", "plan", "explanation", "verification"] as const).map((name) => (
+              {(["diff", "plan", "explanation", "review", "verification"] as const).map((name) => (
                 <button
                   key={name}
                   onClick={() => setTab(name)}
@@ -627,6 +659,13 @@ export default function Home() {
                 >
                   {name === "verification" ? "Patch verification" : name}
                   {name === "diff" && <span className="ml-1.5 font-mono text-xs text-[#8b949e]">{active.files.length}</span>}
+                  {name === "review" && (
+                    active.review?.verdict === "approved" || (active.review?.status === "passed" && active.status === "completed") ? (
+                      <span className="ml-1 text-[#3fb950] font-bold">✓</span>
+                    ) : active.review ? (
+                      <span className="ml-1 text-[#d29922] font-bold">!</span>
+                    ) : null
+                  )}
                   {name === "verification" && active.verification?.result === "verified" && (
                     <span className="ml-1 text-[#3fb950] font-bold">✓</span>
                   )}
@@ -637,9 +676,18 @@ export default function Home() {
               ))}
             </div>
 
-            {tab === "diff" && <Diff run={active} index={fileIndex} setIndex={setFileIndex} />}
+            {tab === "diff" && (
+              <Diff
+                run={active}
+                index={fileIndex}
+                setIndex={setFileIndex}
+                selectedVersion={selectedVersion}
+                setSelectedVersion={setSelectedVersion}
+              />
+            )}
             {tab === "plan" && <Plan run={active} />}
             {tab === "explanation" && <Explanation run={active} />}
+            {tab === "review" && <ReviewPanel run={active} />}
             {tab === "verification" && (
               <VerificationPanel
                 run={active}
@@ -716,8 +764,11 @@ function PatchHeader({
   onDownload: () => void;
 }) {
   const refused = run.status === "refused";
+  const hasPatch = Boolean(run.patch && run.files.length > 0);
   const statusLabel = refused
-    ? "Investigation stopped"
+    ? hasPatch
+      ? "PATCH PROPOSED — REVIEW UNRESOLVED"
+      : "NO PATCH PROPOSED"
     : run.verification
     ? run.verification.verdictLabel
     : run.files.length
@@ -739,13 +790,18 @@ function PatchHeader({
           {statusLabel}
         </p>
         <p className="mt-1 text-lg font-semibold text-white">
-          {refused ? (
+          {refused && !hasPatch ? (
             run.refusal?.kind === "budget_exhausted" ? "Exploration budget exhausted" : run.refusal?.kind === "out_of_scope" ? "Required capability unavailable" : "Patch not approved"
           ) : (
             <>
               {run.metrics.filesChanged || run.files.length} files modified{" "}
               <span className="ml-2 font-mono text-sm font-normal text-[#3fb950]">+{run.metrics.additions}</span>{" "}
               <span className="font-mono text-sm font-normal text-[#f85149]">−{run.metrics.deletions}</span>
+              {refused && hasPatch && (
+                <span className="ml-2 rounded-full border border-[#d29922]/40 bg-[#d29922]/10 px-2 py-0.5 text-xs font-normal text-[#e3b341]">
+                  Review unapproved
+                </span>
+              )}
             </>
           )}
         </p>
@@ -858,8 +914,23 @@ function Inspection({ item, expanded, onToggle }: { item: InspectedFile; expande
   );
 }
 
-function Diff({ run, index, setIndex }: { run: PilotRun; index: number; setIndex: (index: number) => void }) {
-  if (run.status === "refused") {
+function Diff({
+  run,
+  index,
+  setIndex,
+  selectedVersion,
+  setSelectedVersion,
+}: {
+  run: PilotRun;
+  index: number;
+  setIndex: (index: number) => void;
+  selectedVersion?: number;
+  setSelectedVersion?: (version: number) => void;
+}) {
+  const versions = run.patchVersions ?? [];
+  const hasPatch = Boolean(run.files.length > 0 || versions.length > 0);
+
+  if (run.status === "refused" && !hasPatch) {
     return (
       <div className="grid min-h-[440px] place-items-center p-6">
         <div className="max-w-xl rounded-md border border-[#d29922]/40 bg-[#d29922]/[.07] p-5">
@@ -899,18 +970,68 @@ function Diff({ run, index, setIndex }: { run: PilotRun; index: number; setIndex
     );
   }
 
-  const file = run.files[index];
+  const currentVersion = (selectedVersion && versions.find((v) => v.version === selectedVersion)) || (versions.length ? versions[versions.length - 1] : undefined);
+  const files = currentVersion ? currentVersion.files : run.files;
+
+  const file = files[index] || files[0];
   if (!file) return <div className="grid min-h-[440px] place-items-center text-sm text-[#8b949e]">Patch workspace waiting for evidence.</div>;
 
   return (
     <div>
+      {/* Reviewer Refusal Warning Banner (when patch exists but review failed) */}
+      {run.status === "refused" && (
+        <div className="border-b border-[#d29922]/40 bg-[#d29922]/10 p-4">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-[#d29922]" />
+            <p className="font-mono text-[11px] font-semibold uppercase tracking-[.14em] text-[#e3b341]">
+              Reviewer Refusal — Unresolved Concerns
+            </p>
+          </div>
+          <p className="mt-1 text-xs text-[#c9d1d9]">{run.refusal?.reason || "The reviewer found unaddressed concerns or missing requirements."}</p>
+          {currentVersion?.reviewerFeedback && currentVersion.reviewerFeedback.length > 0 && (
+            <div className="mt-2 rounded border border-[#d29922]/30 bg-[#0d1117] p-2 text-xs text-[#e3b341]">
+              <span className="font-semibold">Reviewer Concerns:</span> {currentVersion.reviewerFeedback.join("; ")}
+            </div>
+          )}
+          <p className="mt-2 text-[11px] text-[#8b949e]">
+            The proposed code and unified diff below remain fully inspectable and downloadable.
+          </p>
+        </div>
+      )}
+
+      {/* Version Selector (when multiple patch versions exist) */}
+      {versions.length > 1 && (
+        <div className="flex items-center gap-2 border-b border-[#30363d] bg-[#161b22] px-4 py-2 text-xs">
+          <span className="font-mono text-[11px] uppercase tracking-[.1em] text-[#8b949e]">Version:</span>
+          {versions.map((v) => {
+            const isSelected = (currentVersion?.version ?? versions[versions.length - 1].version) === v.version;
+            return (
+              <button
+                key={v.version}
+                onClick={() => {
+                  setSelectedVersion?.(v.version);
+                  setIndex(0);
+                }}
+                className={`rounded px-2.5 py-1 font-mono text-xs transition-colors ${
+                  isSelected
+                    ? "bg-[#238636] text-white font-medium"
+                    : "bg-[#0d1117] text-[#8b949e] hover:text-white border border-[#30363d]"
+                }`}
+              >
+                {v.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div className="flex overflow-x-auto border-b border-[#30363d] bg-[#0d1117] px-3">
-        {run.files.map((change, fileIndex) => (
+        {files.map((change, fileIndex) => (
           <button
             key={change.path}
             onClick={() => setIndex(fileIndex)}
             className={
-              (index === fileIndex ? "border-b-2 border-[#f78166] bg-[#161b22] text-white" : "border-b-2 border-transparent text-[#8b949e]") +
+              ((files[index] ? index === fileIndex : fileIndex === 0) ? "border-b-2 border-[#f78166] bg-[#161b22] text-white" : "border-b-2 border-transparent text-[#8b949e]") +
               " -mb-px shrink-0 px-3 py-3 font-mono text-xs"
             }
           >
@@ -1017,6 +1138,106 @@ function Explanation({ run }: { run: PilotRun }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+function ReviewPanel({ run }: { run: PilotRun }) {
+  const review = run.review;
+  const isApproved = review?.verdict === "approved" || (review?.status === "passed" && run.status === "completed");
+
+  return (
+    <div className="p-5 space-y-6">
+      <div className="rounded-md border border-[#30363d] bg-[#0d1117] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <span
+              className={`rounded-full border px-2.5 py-1 font-mono text-[10px] font-semibold tracking-[.12em] ${
+                isApproved
+                  ? "border-[#3fb950] bg-[#3fb950]/10 text-[#aff5b4]"
+                  : "border-[#d29922] bg-[#d29922]/10 text-[#e3b341]"
+              }`}
+            >
+              {isApproved ? "REVIEW APPROVED" : "REVIEW REFUSED"}
+            </span>
+            <span className="font-mono text-xs text-[#8b949e]">
+              {review?.revisionCount ? `${review.revisionCount} revision round${review.revisionCount === 1 ? "" : "s"}` : "Initial review"}
+            </span>
+          </div>
+          <p className="mt-2 text-sm text-[#c9d1d9]">
+            {isApproved
+              ? "All reviewer safety and requirement checks passed without blocking concerns."
+              : run.refusal?.reason || review?.feedback?.join(" ") || "The reviewer found unaddressed concerns or missing requirements."}
+          </p>
+        </div>
+      </div>
+
+      {review?.feedback && review.feedback.length > 0 && (
+        <div className="space-y-2">
+          <h4 className="font-mono text-[10px] uppercase tracking-[.12em] text-[#8b949e]">
+            Reviewer Feedback & Concerns
+          </h4>
+          <div className="space-y-1.5">
+            {review.feedback.map((item, idx) => (
+              <div key={idx} className="rounded bg-[#0d1117] border border-[#30363d] p-3 text-xs text-[#e3b341]">
+                • {item}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {review?.checks && review.checks.length > 0 && (
+        <div className="space-y-2">
+          <h4 className="font-mono text-[10px] uppercase tracking-[.12em] text-[#8b949e]">
+            Review Checks
+          </h4>
+          <div className="divide-y divide-[#30363d] rounded-md border border-[#30363d] bg-[#0d1117]">
+            {review.checks.map((check, idx) => {
+              const passed = check.status === "passed";
+              return (
+                <div key={idx} className="flex items-center justify-between p-3 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className={`h-2.5 w-2.5 rounded-full ${passed ? "bg-[#3fb950]" : "bg-[#d29922]"}`} />
+                    <span className="font-medium text-white">{check.label}</span>
+                  </div>
+                  <span className={`font-mono text-[10px] uppercase tracking-[.1em] ${passed ? "text-[#aff5b4]" : "text-[#e3b341]"}`}>
+                    {check.status}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {run.patchVersions && run.patchVersions.length > 0 && (
+        <div className="space-y-2">
+          <h4 className="font-mono text-[10px] uppercase tracking-[.12em] text-[#8b949e]">
+            Patch History
+          </h4>
+          <div className="divide-y divide-[#30363d] rounded-md border border-[#30363d] bg-[#0d1117]">
+            {run.patchVersions.map((v) => (
+              <div key={v.version} className="flex items-center justify-between p-3 text-xs">
+                <div>
+                  <span className="font-medium text-white">{v.label}</span>
+                  <span className="ml-2 font-mono text-[11px] text-[#8b949e]">
+                    ({v.files.length} file{v.files.length === 1 ? "" : "s"} modified)
+                  </span>
+                  {v.reviewerFeedback && v.reviewerFeedback.length > 0 && (
+                    <p className="mt-1 text-[11px] text-[#e3b341]">
+                      Feedback: {v.reviewerFeedback.join("; ")}
+                    </p>
+                  )}
+                </div>
+                <span className="font-mono text-[10px] text-[#6e7681]">
+                  +{v.files.reduce((s, f) => s + f.additions, 0)} -{v.files.reduce((s, f) => s + f.deletions, 0)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

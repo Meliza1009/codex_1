@@ -46,6 +46,9 @@ async function scenario(name, options = {}) {
       }
       if (schema.required.includes('changes')) { coderCalls++; if (coderCalls === 2) { assert.match(prompt, /REVIEWER FEEDBACK/); assert.match(prompt, /PREVIOUS PROPOSED CONTENTS/); } return JSON.stringify({ changes: [{ path: options.badPath ? 'src/secret.ts' : options.unsummarized ? 'src/follow0.ts' : 'src/validator.ts', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'Reject empty names' }] }); }
       reviews++;
+      if (options.firstReviewRefuses) {
+        return JSON.stringify({ verdict: 'refuse', requirementsCovered: false, unrelatedChanges: false, likelySyntaxRisk: false, apiBreakageRisk: false, evidenceSupported: true, missingRequirements: ['Empty strings must be rejected'], feedback: ['Direct refusal on first review'] });
+      }
       const revise = (options.revise && reviews === 1) || options.reviewFails;
       return JSON.stringify({ verdict: revise ? 'revise' : 'approve', requirementsCovered: !revise, unrelatedChanges: false, likelySyntaxRisk: false, apiBreakageRisk: false, evidenceSupported: true, missingRequirements: revise ? ['Empty strings must be rejected'] : [], feedback: revise ? ['Add empty-string validation'] : [] });
     },
@@ -58,10 +61,32 @@ async function scenario(name, options = {}) {
     assert.ok(run.stages.every((stage) => !['pending', 'active'].includes(stage.status)));
     assert.equal(new Set(run.searches.map((search) => search.query.toLowerCase())).size, run.searches.length);
     assert.equal(new Set(run.inspectedFiles.map((file) => file.path)).size, run.inspectedFiles.length);
-    if (options.outOfScope || options.budget || options.badPath || options.reviewFails) { assert.equal(run.status, 'refused'); assert.equal(run.patch, ''); }
-    else { assert.equal(run.status, 'completed'); assert.ok(run.patch.includes('+export')); assert.equal(run.metrics.explorationRounds, options.rounds || 1); }
+    if (options.outOfScope || options.budget || options.badPath) {
+      assert.equal(run.status, 'refused');
+      assert.equal(run.patch, '');
+      assert.equal(run.files.length, 0);
+    } else if (options.reviewFails || options.firstReviewRefuses) {
+      assert.equal(run.status, 'refused');
+      assert.equal(run.refusal.code, 'PATCH_REVIEW_FAILED');
+      assert.ok(run.patch.includes('+export'));
+      assert.ok(run.files.length > 0);
+      assert.ok(run.originalPatch);
+      if (options.reviewFails) {
+        assert.ok(run.revisedPatch);
+        assert.equal(run.patchVersions.length, 2);
+      } else {
+        assert.equal(run.patchVersions.length, 1);
+      }
+    } else {
+      assert.equal(run.status, 'completed');
+      assert.ok(run.patch.includes('+export'));
+      assert.equal(run.metrics.explorationRounds, options.rounds || 1);
+      assert.ok(run.originalPatch);
+      assert.ok(run.finalPatch);
+    }
     if (options.budget) { assert.equal(run.refusal.code, 'BUDGET_EXHAUSTED'); assert.doesNotMatch(run.refusal.suggestedNextStep, /runtime/); }
     if (options.revise || options.reviewFails) { assert.equal(reviews, 2); assert.equal(coderCalls, 2); }
+    if (options.firstReviewRefuses) { assert.equal(reviews, 1); assert.equal(coderCalls, 1); }
     if (options.outOfScope) assert.equal(run.refusal.code, 'OUT_OF_SCOPE_HARDWARE');
   }
   console.log(`PASS ${name}`);
@@ -73,7 +98,8 @@ async function scenario(name, options = {}) {
   await scenario('explicit capability refusal', { outOfScope: true });
   await scenario('budget exhaustion preserves missing facts', { budget: true });
   await scenario('one genuine revision', { revise: true });
-  await scenario('second review refuses and publishes no patch', { reviewFails: true });
+  await scenario('second review refuses but preserves both patch versions', { reviewFails: true });
+  await scenario('first review refuses but preserves initial patch', { firstReviewRefuses: true });
   await scenario('unapproved coder path refused', { badPath: true });
   await scenario('malformed output controlled failure', { malformed: true });
   await scenario('malformed output retry recovery', { malformed: true, recover: true });
