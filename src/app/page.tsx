@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
-import type { Activity, InspectedFile, PilotRun, RunError, RunEvent, VerificationReport, VerificationStage } from "@/lib/pilot-types";
+import type { Activity, InspectedFile, PilotRun, RunError, RunEvent, VerificationReport } from "@/lib/pilot-types";
 
 const examples = [
   { label: "clsx #100", url: "https://github.com/lukeed/clsx/issues/100" },
@@ -28,7 +28,7 @@ const sample: PilotRun = {
     { id: "writing", label: "Generating patch", status: "complete", elapsedMs: 7600 },
     { id: "reviewing", label: "Reviewing patch", status: "complete", elapsedMs: 11300 },
     { id: "revising", label: "Revising patch", status: "skipped" },
-    { id: "verifying", label: "Verifying patch", status: "complete", elapsedMs: 14500 },
+    { id: "verifying", label: "Developer-side QA", status: "skipped" },
   ],
   activity: [
     { id: "1", stage: "understanding", action: "Parsed issue requirements", detail: "Loaded issue #123 and its description.", elapsedMs: 400, status: "completed" },
@@ -43,9 +43,7 @@ const sample: PilotRun = {
     { id: "10", stage: "writing", action: "Modified 2 source files", detail: "Generated a reviewable unified diff.", elapsedMs: 7600, status: "completed" },
     { id: "11", stage: "reviewing", action: "Issue requirements covered", detail: "Reviewer check passed.", elapsedMs: 9000, status: "completed" },
     { id: "12", stage: "reviewing", action: "Only relevant files modified", detail: "Reviewer check passed.", elapsedMs: 9700, status: "completed" },
-    { id: "13", stage: "verifying", action: "Created temporary workspace", detail: "Cloned clean copy of acme/astro-ui into .codex-pilot/workspaces/sample-123.", elapsedMs: 12000, status: "completed" },
-    { id: "14", stage: "verifying", action: "Patch applied cleanly", detail: "2 files modified without conflicts.", elapsedMs: 12500, status: "completed" },
-    { id: "15", stage: "verifying", action: "Validation passed", detail: "Build passed, 14/14 tests passed, theme persistence verified.", elapsedMs: 14500, status: "completed" },
+    { id: "13", stage: "verifying", action: "Execution not performed", detail: "This sample patch is available for developer-side QA only.", elapsedMs: 12000, status: "warning" },
   ],
   searches: [{ query: "theme persistence refresh", matches: 3, detail: "Ranked relevant state and provider files." }],
   inspectedFiles: [
@@ -68,6 +66,7 @@ const sample: PilotRun = {
   files: [
     {
       path: "src/hooks/useTheme.ts",
+      operation: "modify",
       role: "source",
       requirementsCovered: ["R1", "R3"],
       additions: 14,
@@ -77,6 +76,7 @@ const sample: PilotRun = {
     },
     {
       path: "src/providers/ThemeProvider.tsx",
+      operation: "modify",
       role: "source",
       requirementsCovered: ["R2"],
       additions: 7,
@@ -110,7 +110,7 @@ const sample: PilotRun = {
     repeatSearches: [],
   },
   confidence: "high",
-  limitations: ["Validated in isolated temporary workspace; upstream repo untouched."],
+  limitations: ["Target repository code was not executed; developer-side QA is required."],
   metrics: { elapsedMs: 14500, filesIndexed: 184, filesInspected: 3, searches: 2, explorationRounds: 2, revisions: 0, filesChanged: 2, additions: 21, deletions: 4 },
   patch: "diff --git a/src/hooks/useTheme.ts b/src/hooks/useTheme.ts\n@@ -4,10 +4,21 @@\n export function useTheme() {\n-  const [theme, setTheme] = useState<Theme>(\"light\");\n+  const [theme, setTheme] = useState<Theme>(() => {\n+    if (typeof window === \"undefined\") return \"light\";\n+    return (localStorage.getItem(\"theme\") as Theme) ?? \"light\";\n+  });\n \n-  return { theme, setTheme };\n+  const updateTheme = (nextTheme: Theme) => {\n+    setTheme(nextTheme);\n+    localStorage.setItem(\"theme\", nextTheme);\n+  };\n+\n+  return { theme, setTheme: updateTheme };\n }\n",
   originalPatch: "diff --git a/src/hooks/useTheme.ts b/src/hooks/useTheme.ts\n@@ -4,10 +4,21 @@\n export function useTheme() {\n-  const [theme, setTheme] = useState<Theme>(\"light\");\n+  const [theme, setTheme] = useState<Theme>(() => {\n+    if (typeof window === \"undefined\") return \"light\";\n+    return (localStorage.getItem(\"theme\") as Theme) ?? \"light\";\n+  });\n \n-  return { theme, setTheme };\n+  const updateTheme = (nextTheme: Theme) => {\n+    setTheme(nextTheme);\n+    localStorage.setItem(\"theme\", nextTheme);\n+  };\n+\n+  return { theme, setTheme: updateTheme };\n }\n",
@@ -123,6 +123,7 @@ const sample: PilotRun = {
       files: [
         {
           path: "src/hooks/useTheme.ts",
+          operation: "modify",
           role: "source",
           requirementsCovered: ["R1", "R3"],
           additions: 14,
@@ -132,6 +133,7 @@ const sample: PilotRun = {
         },
         {
           path: "src/providers/ThemeProvider.tsx",
+          operation: "modify",
           role: "source",
           requirementsCovered: ["R2"],
           additions: 7,
@@ -148,19 +150,20 @@ const sample: PilotRun = {
     },
   ],
   verification: {
-    result: "verified",
-    verdictLabel: "VERIFIED FIX",
-    summary: "Temporary workspace created at .codex-pilot/workspaces/sample-123. Patch applied cleanly. Build and existing tests passed (14/14). Theme persistence verified.",
-    durationMs: 3200,
-    workspace: ".codex-pilot/workspaces/sample-123",
-    commandsDetected: { build: "npm run build", test: "npm test" },
+    result: "verification_unavailable",
+    verdictLabel: "PATCH PROPOSED — NOT EXECUTED",
+    summary: "This sample patch was not executed. Download it and run repository-defined QA in an approved developer environment.",
+    durationMs: 0,
     stages: [
+      { id: "workspace", name: "Developer-side QA", status: "skipped", detail: "Target repository execution is disabled." },
+      /* Legacy sample execution details are intentionally not displayed.
       { id: "workspace", name: "Temporary workspace", status: "passed", detail: "Workspace created at .codex-pilot/workspaces/sample-123" },
       { id: "patch", name: "Patch application", status: "passed", detail: "2 files modified cleanly (src/hooks/useTheme.ts, src/providers/ThemeProvider.tsx)" },
       { id: "detect", name: "Command detection", status: "passed", detail: "Detected: build: npm run build · test: npm test" },
       { id: "build", name: "Static/build check", status: "passed", detail: "✓ npm run build passed in 1.4s" },
       { id: "test", name: "Existing tests", status: "passed", detail: "✓ npm test passed: 14/14 passed" },
       { id: "issue", name: "Issue verification", status: "passed", detail: "✓ Theme persistence after refresh verified" },
+      */
     ],
   },
 };
@@ -244,7 +247,7 @@ export default function Home() {
   const [selectedVersion, setSelectedVersion] = useState<number | undefined>(undefined);
   const [fileIndex, setFileIndex] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [verifying, setVerifying] = useState(false);
+  const verifying = false;
   const [error, setError] = useState<RunError | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [how, setHow] = useState(false);
@@ -368,6 +371,18 @@ export default function Home() {
     if (verifying || loading || !active.patch) return;
     setError(null);
     setTab("verification");
+    setRun((prev) => prev ? {
+      ...prev,
+      verification: {
+        result: "verification_unavailable",
+        verdictLabel: "PATCH PROPOSED — NOT EXECUTED",
+        summary: "Codex Pilot does not execute target repository code. Download the patch and run repository-defined QA in an approved developer environment.",
+        durationMs: 0,
+        stages: [{ id: "workspace", name: "Developer-side QA", status: "skipped", detail: "Target repository execution is disabled." }],
+      },
+    } : prev);
+    return;
+    /* Legacy execution flow retained in history; target repository execution is disabled.
 
     if (hostedPreview || active.source === "sample") {
       setVerifying(true);
@@ -513,6 +528,7 @@ export default function Home() {
     } finally {
       setVerifying(false);
     }
+    */
   }
 
   const patch = active.patch || active.files.map((file) => file.diff).join("\n");
@@ -542,7 +558,7 @@ export default function Home() {
             </span>
             <span>Codex Pilot</span>
             <span className="hidden border-l border-[#30363d] pl-2.5 text-xs font-normal text-[#8b949e] sm:block">
-              Issue investigation & patch verification workspace
+              Issue investigation & patch proposal workspace
             </span>
           </Link>
           <div className="flex items-center gap-2 text-xs text-[#8b949e]">
@@ -557,18 +573,18 @@ export default function Home() {
           <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
             <div>
               <p className="font-mono text-[11px] font-medium uppercase tracking-[.16em] text-[#58a6ff]">
-                Autonomous repository investigation & verification
+                Autonomous repository investigation & patch proposal
               </p>
               <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white sm:text-3xl">
-                From issue to verified fix.
+                From issue to reviewable patch.
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-[#8b949e]">
-                Codex Pilot selectively explores public repositories, builds a reviewable patch, and validates it against disposable working copies.
+                Codex Pilot selectively explores public repositories, builds a reviewable patch, and records evidence and review findings for developer-side QA.
               </p>
             </div>
             <div className="flex gap-2 text-xs text-[#8b949e]">
               <span className="rounded-full border border-[#30363d] bg-[#0d1117] px-2.5 py-1">Public issues</span>
-              <span className="rounded-full border border-[#30363d] bg-[#0d1117] px-2.5 py-1">Isolated validation</span>
+              <span className="rounded-full border border-[#30363d] bg-[#0d1117] px-2.5 py-1">No target execution</span>
               <span className="rounded-full border border-[#30363d] bg-[#0d1117] px-2.5 py-1">No upstream touch</span>
             </div>
           </div>
@@ -854,7 +870,7 @@ function PatchHeader({
             className="inline-flex items-center gap-1.5 rounded-md bg-[#238636] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Icon name="check" />
-            {verifying ? "Verifying…" : "Verify Patch"}
+            {verifying ? "Opening QA guidance…" : "QA guidance"}
           </button>
           <button
             onClick={onDownload}
@@ -1091,6 +1107,15 @@ function Diff({
                 {change.role}
               </span>
             )}
+            <span className={`rounded border px-1.5 py-0.5 text-[9px] font-sans font-semibold uppercase tracking-wider ${
+              change.operation === "create"
+                ? "border-[#3fb950]/40 bg-[#238636]/20 text-[#3fb950]"
+                : change.operation === "delete"
+                ? "border-[#f85149]/40 bg-[#da3633]/20 text-[#ff7b72]"
+                : "border-[#30363d] bg-[#161b22] text-[#8b949e]"
+            }`}>
+              {change.operation}
+            </span>
             <span>{change.path.split("/").pop()}</span>
             <span className="ml-1 text-[#3fb950]">+{change.additions}</span>
             <span className="ml-1 text-[#f85149]">−{change.deletions}</span>
@@ -1106,6 +1131,9 @@ function Diff({
                 role: {file.role}
               </span>
             )}
+            <span className="rounded border border-[#30363d] bg-[#161b22] px-2 py-0.5 text-[10px] font-mono text-[#8b949e]">
+              operation: {file.operation}
+            </span>
           </div>
           <p className="mt-1 text-xs text-[#8b949e]">{file.reason}</p>
         </div>
@@ -1120,6 +1148,25 @@ function Diff({
           </div>
         )}
       </div>
+      {file.operation === "create" && file.updatedContent !== null && (
+        <section className="border-b border-[#30363d] bg-[#161b22] p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="font-mono text-xs text-[#3fb950]">New file proposal: {file.path}</p>
+              <p className="mt-1 text-xs text-[#8b949e]">Full file content is preserved locally in this proposal; nothing is created on GitHub.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => { void navigator.clipboard?.writeText(file.updatedContent || "").catch(() => undefined); }}
+              className="inline-flex items-center gap-1.5 rounded border border-[#30363d] bg-[#0d1117] px-2.5 py-1.5 text-xs text-[#c9d1d9] hover:border-[#58a6ff] hover:text-white"
+              aria-label={`Copy code for ${file.path}`}
+            >
+              <Icon name="copy" /> Copy code
+            </button>
+          </div>
+          <pre className="mt-3 max-h-64 overflow-auto rounded border border-[#30363d] bg-[#0d1117] p-3 font-mono text-xs leading-5 text-[#c9d1d9]">{file.updatedContent}</pre>
+        </section>
+      )}
       <div className="max-h-[560px] overflow-auto bg-[#0d1117] p-3 font-mono text-xs leading-5">
         {numberedDiff(file.diff).map((line) => (
           <div
@@ -1168,6 +1215,7 @@ function Plan({ run }: { run: PilotRun }) {
               <div className="min-w-0">
                 <p className="text-sm text-white">{step.title}</p>
                 <p className="mt-1 text-xs text-[#8b949e]">{step.detail}</p>
+                {step.operation ? <p className="mt-1 font-mono text-[10px] uppercase tracking-[.1em] text-[#8b949e]">{step.operation}</p> : null}
                 {step.paths?.length ? <p className="mt-2 truncate font-mono text-[11px] text-[#79c0ff]">{step.paths.join(" · ")}</p> : null}
               </div>
             </div>
@@ -1503,7 +1551,7 @@ function VerificationPanel({
   onVerify: () => void;
 }) {
   const verification = run.verification;
-  const statusColors = {
+  const statusColors: Partial<Record<VerificationReport["verdictLabel"], string>> = {
     "VERIFIED FIX": "border-[#238636] bg-[#238636]/10 text-[#aff5b4]",
     "PATCH PROPOSED — NOT VERIFIED": "border-[#d29922] bg-[#d29922]/10 text-[#e3b341]",
     "PATCH FAILED VERIFICATION": "border-[#f85149] bg-[#f85149]/10 text-[#ff7b72]",
@@ -1555,7 +1603,7 @@ function VerificationPanel({
             className="inline-flex items-center gap-1.5 rounded-md bg-[#238636] px-3.5 py-2 text-xs font-medium text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Icon name="check" />
-            {verifying ? "Verifying patch…" : verification ? "Re-verify Patch" : "Verify Patch"}
+            {verifying ? "Opening QA guidance…" : "Show QA guidance"}
           </button>
         </div>
       </div>
@@ -1625,7 +1673,7 @@ function VerificationPanel({
       )}
 
       <div className="rounded-md border border-[#30363d] bg-[#161b22] p-4 text-xs text-[#8b949e] space-y-1">
-        <p className="font-medium text-[#c9d1d9]">Isolated Verification Contract</p>
+        <p className="font-medium text-[#c9d1d9]">Developer-side QA contract</p>
         <p>• Runs inside a temporary, disposable working directory (.codex-pilot/workspaces/)</p>
         <p>• Never automatically commits, pushes, or opens pull requests</p>
         <p>• Preserves user clones and cleans up temporary files immediately after verification</p>
@@ -1643,7 +1691,7 @@ function How({ run, close }: { run: PilotRun; close: () => void }) {
     ["Plan", String(run.plan.length) + " implementation steps generated"],
     ["Patch", String(run.files.length) + " files changed in a unified diff"],
     ["Review", String(run.review.checks.length) + " checks reviewed"],
-    ["Verification", "Validated against disposable repository working copy before any upstream action"],
+    ["Developer-side QA", "Patch execution was not performed by Codex Pilot"],
   ];
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4" role="dialog" aria-modal="true">
@@ -1651,7 +1699,7 @@ function How({ run, close }: { run: PilotRun; close: () => void }) {
         <div className="flex items-start justify-between border-b border-[#30363d] p-5">
           <div>
             <p className="font-mono text-[10px] uppercase tracking-[.14em] text-[#58a6ff]">Investigation map</p>
-            <h3 className="mt-1 text-lg font-semibold text-white">How Codex reached and verified this patch</h3>
+            <h3 className="mt-1 text-lg font-semibold text-white">How Codex reached this patch proposal</h3>
           </div>
           <button onClick={close} className="rounded p-1 text-[#8b949e] hover:bg-[#21262d] hover:text-white" aria-label="Close">
             <Icon name="close" />
@@ -1672,7 +1720,7 @@ function How({ run, close }: { run: PilotRun; close: () => void }) {
           ))}
         </div>
         <p className="border-t border-[#30363d] px-5 py-4 text-xs leading-5 text-[#8b949e]">
-          Codex Pilot executes verification only inside isolated, disposable local checkouts.
+          Codex Pilot does not execute target repository code. Use the downloaded patch for developer-side QA.
         </p>
       </div>
     </div>

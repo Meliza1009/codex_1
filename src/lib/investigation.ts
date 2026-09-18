@@ -49,22 +49,32 @@ export function normalizeQuery(value: string): string | null {
   return query;
 }
 
-export function proposedDiff(path: string, before: string, after: string) {
-  const lines = (text: string) => text === "" ? [] : text.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n");
+export function proposedDiff(path: string, before: string | null, after: string | null) {
+  const lines = (text: string | null) => !text ? [] : text.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n");
+  const created = before === null;
+  const deleted = after === null;
+  if (created || deleted) {
+    const changed = lines(created ? after : before);
+    const header = created
+      ? [`diff --git a/${path} b/${path}`, "new file mode 100644", "--- /dev/null", `+++ b/${path}`, `@@ -0,0 +1,${changed.length} @@`]
+      : [`diff --git a/${path} b/${path}`, "deleted file mode 100644", `--- a/${path}`, "+++ /dev/null", `@@ -1,${changed.length} +0,0 @@`];
+    const marker = created ? "+" : "-";
+    return { diff: [...header, ...changed.map((line) => marker + line)].join("\n") + "\n", additions: created ? changed.length : 0, deletions: deleted ? changed.length : 0 };
+  }
   const old = lines(before); const next = lines(after);
   let prefix = 0;
   while (prefix < old.length && prefix < next.length && old[prefix] === next[prefix]) prefix++;
   // Include the final line when only EOF newline changes.
-  if (prefix === old.length && prefix === next.length && before.endsWith("\n") !== after.endsWith("\n")) prefix = Math.max(0, prefix - 1);
+  if (prefix === old.length && prefix === next.length && before!.endsWith("\n") !== after!.endsWith("\n")) prefix = Math.max(0, prefix - 1);
   let suffix = 0;
-  while (before.endsWith("\n") === after.endsWith("\n") && suffix < old.length - prefix && suffix < next.length - prefix && old[old.length - 1 - suffix] === next[next.length - 1 - suffix]) suffix++;
+  while (before!.endsWith("\n") === after!.endsWith("\n") && suffix < old.length - prefix && suffix < next.length - prefix && old[old.length - 1 - suffix] === next[next.length - 1 - suffix]) suffix++;
   const start = Math.max(0, prefix - 3); const oldEnd = Math.min(old.length, old.length - suffix + 3); const newEnd = Math.min(next.length, next.length - suffix + 3);
   const output = [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, `@@ -${oldEnd - start ? start + 1 : start},${oldEnd - start} +${newEnd - start ? start + 1 : start},${newEnd - start} @@`];
   const push = (sign: string, text: string, finalWithoutNewline: boolean) => { output.push(sign + text); if (finalWithoutNewline) output.push("\\ No newline at end of file"); };
-  for (let i = start; i < prefix; i++) push(" ", old[i], i === old.length - 1 && !before.endsWith("\n"));
-  for (let i = prefix; i < old.length - suffix; i++) push("-", old[i], i === old.length - 1 && !before.endsWith("\n"));
-  for (let i = prefix; i < next.length - suffix; i++) push("+", next[i], i === next.length - 1 && !after.endsWith("\n"));
-  for (let i = old.length - suffix; i < oldEnd; i++) push(" ", old[i], i === old.length - 1 && !before.endsWith("\n"));
+  for (let i = start; i < prefix; i++) push(" ", old[i], i === old.length - 1 && !before!.endsWith("\n"));
+  for (let i = prefix; i < old.length - suffix; i++) push("-", old[i], i === old.length - 1 && !before!.endsWith("\n"));
+  for (let i = prefix; i < next.length - suffix; i++) push("+", next[i], i === next.length - 1 && !after!.endsWith("\n"));
+  for (let i = old.length - suffix; i < oldEnd; i++) push(" ", old[i], i === old.length - 1 && !before!.endsWith("\n"));
   return { diff: output.join("\n") + "\n", additions: next.length - prefix - suffix, deletions: old.length - prefix - suffix };
 }
 const surfaces: Record<string, RegExp> = {
@@ -125,6 +135,7 @@ export function canonicalPath(value: string): string {
 }
 
 export function classifyFileRole(path: string): import("./pilot-types").FileRole {
+  if (/\.d\.[cm]?ts$/i.test(path)) return "types";
   const norm = path.toLowerCase().replace(/\\/g, "/");
   if (/(^|\/)(dist|build|coverage|\.next|out|generated|vendor)(\/|$)/.test(norm) || /\.min\.[cm]?[jt]s$/.test(norm)) {
     return "generated";
@@ -181,18 +192,6 @@ export function extractStructuredRequirements(
     }
   }
 
-  for (const sym of analysis.importantSymbols) {
-    const cleanSym = sym.replace(/\(.*$/, "").trim();
-    if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(cleanSym) && !["require", "import", "export", "default"].includes(cleanSym)) {
-      list.push({
-        id: nextId(),
-        type: "mustImplement",
-        text: `Implement and export '${cleanSym}' utility/API`,
-        status: "unmapped",
-      });
-    }
-  }
-
   if (bodyBullets.length > 0) {
     const seen = new Set<string>();
     for (const bullet of bodyBullets) {
@@ -221,14 +220,22 @@ export function extractStructuredRequirements(
         status: "unmapped",
       });
     }
-    for (const approach of (analysis.proposedApproaches || []).slice(0, 3)) {
-      list.push({
-        id: nextId(),
-        type: "mustImplement",
-        text: approach,
-        status: "unmapped",
-      });
-    }
+  }
+
+  // The issue-analysis stage identifies maintainer comments separately from
+  // speculation. Preserve only imperative clarifications as requirements.
+  for (const clarification of analysis.maintainerClarifications || []) {
+    const text = clarification.trim();
+    if (!text || list.some((requirement) => requirement.text.toLowerCase() === text.toLowerCase())) continue;
+    if (!/\b(must|should|need(?:s)? to|required?|please|do not)\b/i.test(text)) continue;
+    const type: import("./pilot-types").RequirementType = /\b(tests?|specs?|assert(?:ion)?s?|coverage)\b/i.test(text)
+      ? "mustTest"
+      : /\b(preserve[ds]?|preserving|backward|compatibility|avoid mutating|without changing|existing)\b/i.test(text)
+      ? "mustPreserve"
+      : /\b(docs?|jsdocs?|examples?|readme|documentation)\b/i.test(text)
+      ? "optionalDocs"
+      : "mustImplement";
+    list.push({ id: nextId(), type, text, status: "unmapped" });
   }
 
   for (const constraint of (analysis.constraints || []).slice(0, 3)) {
@@ -240,24 +247,6 @@ export function extractStructuredRequirements(
         status: "unmapped",
       });
     }
-  }
-
-  if (!list.some((r) => r.type === "mustPreserve")) {
-    list.push({
-      id: nextId(),
-      type: "mustPreserve",
-      text: "Preserve existing public APIs and backward compatibility",
-      status: "unmapped",
-    });
-  }
-
-  if (!list.some((r) => r.type === "mustTest")) {
-    list.push({
-      id: nextId(),
-      type: "mustTest",
-      text: `Verify that ${analysis.expectedBehavior || "the requested behavior is covered"}`,
-      status: "unmapped",
-    });
   }
 
   if (!list.some((r) => r.type === "mustImplement")) {
@@ -301,4 +290,3 @@ export function checkTestImportsAgainstSource(
   }
   return { valid: true };
 }
-

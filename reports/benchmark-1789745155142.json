@@ -1,0 +1,48 @@
+{
+  "generatedAt": "2026-09-18T15:25:55.141Z",
+  "total": 3,
+  "results": [
+    {
+      "issueUrl": "https://github.com/lukeed/clsx/issues/100",
+      "repository": "lukeed/clsx",
+      "classification": [
+        "documentation"
+      ],
+      "explorationRounds": 2,
+      "filesInspected": 8,
+      "patchGenerated": false,
+      "reviewerVerdict": "refused",
+      "revisionCount": 0,
+      "finalState": "refused",
+      "reasonCode": "PLAN_SCOPE_INVALID",
+      "runtimeMs": 80711
+    },
+    {
+      "issueUrl": "https://github.com/google/uuid/issues/97",
+      "classification": [],
+      "explorationRounds": 0,
+      "filesInspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": "not_reached",
+      "revisionCount": 0,
+      "finalState": "failed_before_run",
+      "reasonCode": "REPOSITORY_UNSUPPORTED",
+      "runtimeMs": 909
+    },
+    {
+      "issueUrl": "https://github.com/lukeed/clsx/issues/112",
+      "repository": "lukeed/clsx",
+      "classification": [
+        "unknown"
+      ],
+      "explorationRounds": 2,
+      "filesInspected": 8,
+      "patchGenerated": false,
+      "reviewerVerdict": "refused",
+      "revisionCount": 0,
+      "finalState": "refused",
+      "reasonCode": "OUT_OF_SCOPE_RUNTIME",
+      "runtimeMs": 67425
+    }
+  ]
+}

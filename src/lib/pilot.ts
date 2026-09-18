@@ -43,13 +43,14 @@ import type {
 
 type GithubIssue = { number: number; title: string; body: string | null; comments: number; html_url: string; state: "open" | "closed"; pull_request?: unknown };
 type GithubRepo = { default_branch: string; size: number; archived: boolean; disabled: boolean; html_url: string; private: boolean };
+type GithubCommit = { sha: string };
 type TreeItem = { path: string; type: "blob" | "tree"; size?: number };
 type RankedPath = { path: string; matches: string[]; score: number };
 type SearchItem = { path: string };
 type SearchResponse = { items?: SearchItem[] };
 type ExplorerResponse = { missingEvidence: MissingEvidence[]; requiredCapability: "none" | "runtime" | "credentials" | "hardware" | "external_services" | "private_infrastructure"; decision?: "continue" | "ready_to_patch" | "out_of_scope"; confidence?: number; reason?: string; searchQueries?: string[]; filesToInspect?: string[]; repeatJustifications?: { target?: string; reason?: string }[]; evidence?: { path?: string; relevance?: string; findings?: string[] }[] };
-type PlannerResponse = { goal: string; steps: { file: string; action: string; reason: string; requirementsCovered?: string[] }[]; filesAllowedToChange: string[] };
-type CoderResponse = { changes: { path: string; updatedContent: string; explanation: string; role?: FileRole; requirementsCovered?: string[] }[] };
+type PlannerResponse = { goal: string; steps: { file: string; operation: "create" | "modify" | "delete"; action: string; reason: string; requirementsCovered?: string[] }[]; filesAllowedToChange: string[] };
+type CoderResponse = { changes: { path: string; operation: "create" | "modify" | "delete"; updatedContent: string; explanation: string; role?: FileRole; requirementsCovered: string[] }[] };
 type ReviewerResponse = { requirementsCovered?: boolean; unrelatedChanges?: boolean; likelySyntaxRisk?: boolean; missingRequirements: string[]; apiBreakageRisk?: boolean; evidenceSupported?: boolean; verdict?: "approve" | "revise" | "refuse"; feedback?: string[]; requirementCoverage?: Record<string, "pass" | "fail"> };
 type GithubClient = <T>(path: string, raw?: boolean) => Promise<T>;
 type CodexRunner = (prompt: string, schema?: object) => Promise<string>;
@@ -68,7 +69,7 @@ type AgentRunState = {
   manifest: RankedPath[];
   contentCache: Map<string, string>;
   originals: Map<string, string>;
-  proposedContents: Map<string, string>;
+  proposedContents: Map<string, string | null>;
   searches: Search[];
   inspectedFiles: InspectedFile[];
   evidence?: EvidenceReport;
@@ -81,6 +82,7 @@ type AgentRunState = {
   activity: Activity[];
   filesIndexed: number;
   explorationRounds: number;
+  staticRepairCount: number;
   revisionCount: number;
   summary: string;
   originalPatch?: string;
@@ -110,16 +112,44 @@ function headers() { const token = process.env.GITHUB_TOKEN; return { Accept: "a
 function fail(code: string, title: string, message: string, retryable = false): never { throw { code, title, message, retryable } satisfies RunError; }
 function toRunError(error: unknown): RunError { if (error && typeof error === "object" && "code" in error && "title" in error && "message" in error) return error as RunError; return { code: "run_failed", title: "Run interrupted", message: error instanceof Error ? error.message : "Codex Pilot could not complete this run.", retryable: true }; }
 
+async function requireCodexAuthentication() {
+  const result = await new Promise<{ code: number | null; error?: string }>((resolve) => {
+    const child = spawn("codex", ["login", "status"], { windowsHide: true, stdio: "ignore", shell: false });
+    child.once("error", (error) => resolve({ code: null, error: error.message }));
+    child.once("close", (code) => resolve({ code }));
+  });
+  if (result.code !== 0) fail("CODEX_UNAVAILABLE", "Codex CLI is not authenticated", result.error ? `Codex CLI could not be started: ${result.error}` : "Run 'codex login' on this machine before starting a live investigation.", true);
+}
+
 async function github<T>(path: string, raw = false): Promise<T> {
   const rawPath = raw ? path.match(/^\/repos\/([^/]+)\/([^/]+)\/contents\/(.+)\?ref=(.+)$/) : null;
   const url = rawPath ? `https://raw.githubusercontent.com/${rawPath[1]}/${rawPath[2]}/${rawPath[4]}/${rawPath[3]}` : `${API}${path}`;
-  const response = await fetch(url, { headers: raw ? { Accept: "text/plain", "User-Agent": "codex-pilot" } : headers(), cache: "no-store", signal: AbortSignal.timeout(30000) });
+  const response = await fetch(url, { headers: raw ? { ...headers(), Accept: "text/plain" } : headers(), cache: "no-store", signal: AbortSignal.timeout(30000) });
   if (!response.ok) {
     if (response.status === 404) fail("private_or_missing", "Repository or issue unavailable", "Codex Pilot supports public GitHub issues only. Check the URL and repository visibility.");
-    if (response.status === 403 || response.status === 429) fail("GITHUB_RATE_LIMITED", "GitHub rate limit reached", "GitHub temporarily limited this request. Add GITHUB_TOKEN or try again shortly.", true);
+    if (response.status === 403 || response.status === 429) {
+      const reset = response.headers.get("x-ratelimit-reset");
+      const retryAt = reset && /^\d+$/.test(reset) ? ` Retry after ${new Date(Number(reset) * 1000).toLocaleTimeString()}.` : "";
+      fail("GITHUB_RATE_LIMITED", "GitHub rate limit reached", `GitHub temporarily limited this request.${process.env.GITHUB_TOKEN ? " The configured token was also limited." : " Add GITHUB_TOKEN for a higher local request limit."}${retryAt}`, true);
+    }
     fail("github_request_failed", "GitHub request failed", `GitHub returned status ${response.status}.`, response.status >= 500);
   }
   return (raw ? response.text() : response.json()) as Promise<T>;
+}
+
+function cachedGithubClient(client: GithubClient): GithubClient {
+  const cache = new Map<string, Promise<unknown>>();
+  return <T>(path: string, raw = false) => {
+    const key = `${raw ? "raw" : "api"}:${path}`;
+    const existing = cache.get(key);
+    if (existing) return existing as Promise<T>;
+    const pending = client<T>(path, raw).catch((error) => {
+      cache.delete(key);
+      throw error;
+    });
+    cache.set(key, pending);
+    return pending;
+  };
 }
 
 export function parseIssueUrl(value: string) {
@@ -137,6 +167,18 @@ function sourceFiles(tree: TreeItem[], analysis?: IssueAnalysis) {
     return Boolean(analysis?.importantPaths.some((path) => item.path === path || item.path.endsWith("/" + path))) && !/\.(png|jpe?g|gif|svg|ico|pdf|zip|gz|woff2?|map)$/i.test(item.path);
   });
 }
+function scopeLargeTree(tree: TreeItem[], analysis: IssueAnalysis) {
+  if (tree.length <= MAX_TREE_ENTRIES) return tree;
+  const roots = new Set<string>();
+  for (const mentioned of analysis.importantPaths) {
+    const path = canonicalPath(mentioned);
+    const parts = path.split("/");
+    if (parts.length > 1) roots.add(parts.slice(0, -1).join("/"));
+    else if (path) roots.add(path);
+  }
+  const scoped = tree.filter((item) => [...roots].some((root) => item.path === root || item.path.startsWith(`${root}/`)));
+  return scoped.length > 0 && scoped.length <= MAX_TREE_ENTRIES ? scoped : null;
+}
 function countLines(value: string) { return value ? value.split("\n").length : 0; }
 function compactIssue(state: AgentRunState) { const issue = state.issueData!; return `ISSUE\n#${issue.number}: ${issue.title}\n${issue.body ?? "(No description)"}\n\nCOMMENTS\n${state.comments.map((comment) => `[${comment.author_association ?? "UNVERIFIED"}] ${comment.body}`).join("\n---\n").slice(0, 6000) || "(No comments)"}`; }
 function evidenceSummary(evidence?: EvidenceReport) { return evidence ? evidence.evidence.map((item) => `- ${item.path}: ${item.relevance}\n  Findings: ${item.findings.join("; ")}`).join("\n") : "(No evidence yet)"; }
@@ -145,11 +187,11 @@ function inspectedContents(state: AgentRunState) { return [...state.originals].m
 const explorerSchema = { type: "object", additionalProperties: false, required: ["missingEvidence", "requiredCapability", "decision", "searchQueries", "filesToInspect", "repeatJustifications", "reason", "confidence", "evidence"], properties: { missingEvidence: { type: "array", maxItems: 6, items: { type: "object", additionalProperties: false, required: ["fact", "whyNeeded"], properties: { fact: { type: "string", minLength: 10 }, whyNeeded: { type: "string", minLength: 10 } } } }, requiredCapability: { type: "string", enum: ["none", "runtime", "credentials", "hardware", "external_services", "private_infrastructure"] }, decision: { type: "string", enum: ["continue", "ready_to_patch", "out_of_scope"] }, searchQueries: { type: "array", maxItems: MAX_SEARCHES_PER_ROUND, items: { type: "string", maxLength: 80 } }, filesToInspect: { type: "array", maxItems: MAX_FILES_PER_ROUND, items: { type: "string" } }, repeatJustifications: { type: "array", maxItems: MAX_SEARCHES_PER_ROUND, items: { type: "object", additionalProperties: false, required: ["target", "reason"], properties: { target: { type: "string" }, reason: { type: "string", minLength: 8 } } } }, confidence: { type: "number", minimum: 0, maximum: 1 }, reason: { type: "string" }, evidence: { type: "array", maxItems: MAX_FILES_INSPECTED, items: { type: "object", additionalProperties: false, required: ["path", "relevance", "findings"], properties: { path: { type: "string" }, relevance: { type: "string" }, findings: { type: "array", maxItems: 4, items: { type: "string" } } } } } } } as const;
 const plannerSchema = { type: "object", additionalProperties: false, required: ["goal", "steps", "filesAllowedToChange"], properties: {
   goal: { type: "string", minLength: 1 }, filesAllowedToChange: { type: "array", minItems: 1, maxItems: MAX_CHANGED_FILES, items: { type: "string" } },
-  steps: { type: "array", minItems: 1, maxItems: 8, items: { type: "object", additionalProperties: false, required: ["file", "action", "reason"], properties: { file: { type: "string" }, action: { type: "string", minLength: 1 }, reason: { type: "string", minLength: 1 }, requirementsCovered: { type: "array", items: { type: "string" } } } } }
+  steps: { type: "array", minItems: 1, maxItems: 8, items: { type: "object", additionalProperties: false, required: ["file", "operation", "action", "reason", "requirementsCovered"], properties: { file: { type: "string" }, operation: { type: "string", enum: ["create", "modify", "delete"] }, action: { type: "string", minLength: 1 }, reason: { type: "string", minLength: 1 }, requirementsCovered: { type: "array", minItems: 1, items: { type: "string" } } } } }
 } };
-const coderSchema = { type: "object", additionalProperties: false, required: ["changes"], properties: { changes: { type: "array", minItems: 1, maxItems: MAX_CHANGED_FILES, items: { type: "object", additionalProperties: false, required: ["path", "updatedContent", "explanation"], properties: { path: { type: "string" }, updatedContent: { type: "string", maxLength: MAX_FILE_BYTES }, explanation: { type: "string", minLength: 1 }, role: { type: "string", enum: ["source", "test", "docs", "config", "generated"] }, requirementsCovered: { type: "array", items: { type: "string" } } } } } } };
+const coderSchema = { type: "object", additionalProperties: false, required: ["changes"], properties: { changes: { type: "array", minItems: 1, maxItems: MAX_CHANGED_FILES, items: { type: "object", additionalProperties: false, required: ["path", "updatedContent", "explanation", "operation", "requirementsCovered"], properties: { path: { type: "string" }, operation: { type: "string", enum: ["create", "modify", "delete"] }, updatedContent: { type: "string", maxLength: MAX_FILE_BYTES }, explanation: { type: "string", minLength: 1 }, role: { type: "string", enum: ["source", "test", "docs", "config", "types", "generated"] }, requirementsCovered: { type: "array", minItems: 1, items: { type: "string" } } } } } } };
 
-const reviewSchema = { type: "object", additionalProperties: false, required: ["missingRequirements", "requirementsCovered", "unrelatedChanges", "likelySyntaxRisk", "apiBreakageRisk", "evidenceSupported", "verdict", "feedback"], properties: { missingRequirements: { type: "array", maxItems: 8, items: { type: "string" } }, requirementsCovered: { type: "boolean" }, unrelatedChanges: { type: "boolean" }, likelySyntaxRisk: { type: "boolean" }, apiBreakageRisk: { type: "boolean" }, evidenceSupported: { type: "boolean" }, verdict: { type: "string", enum: ["approve", "revise", "refuse"] }, feedback: { type: "array", maxItems: 4, items: { type: "string" } }, requirementCoverage: { type: "object", additionalProperties: { type: "string" } } } } as const;
+const reviewSchema = { type: "object", additionalProperties: false, required: ["missingRequirements", "requirementsCovered", "unrelatedChanges", "likelySyntaxRisk", "apiBreakageRisk", "evidenceSupported", "verdict", "feedback", "requirementCoverage"], properties: { missingRequirements: { type: "array", maxItems: 8, items: { type: "string" } }, requirementsCovered: { type: "boolean" }, unrelatedChanges: { type: "boolean" }, likelySyntaxRisk: { type: "boolean" }, apiBreakageRisk: { type: "boolean" }, evidenceSupported: { type: "boolean" }, verdict: { type: "string", enum: ["approve", "revise", "refuse"] }, feedback: { type: "array", maxItems: 4, items: { type: "string" } }, requirementCoverage: { type: "object", additionalProperties: { type: "string" } } } } as const;
 
 async function runCodex(prompt: string, schema?: object) {
   const folder = await mkdtemp(join(tmpdir(), "codex-pilot-")); const output = join(folder, "answer.json"); const schemaPath = join(folder, "response-schema.json");
@@ -171,7 +213,7 @@ async function responseJson<T>(runner: CodexRunner, instructions: string, input:
   return fail("MALFORMED_AGENT_OUTPUT", "Invalid agent response", "The agent returned invalid structured output twice. No patch was published.", true);
 }
 
-function createState(): AgentRunState { return { comments: [], manifest: [], requestedFiles: [], contentCache: new Map(), originals: new Map(), proposedContents: new Map(), searches: [], inspectedFiles: [], plan: [], files: [], explanations: [], limitations: [], stages: (Object.keys(stageLabels) as StageId[]).map((id) => ({ id, label: stageLabels[id], status: "pending" })), activity: [], filesIndexed: 0, explorationRounds: 0, revisionCount: 0, summary: "", patchVersions: [], requirements: [] }; }
+function createState(): AgentRunState { return { comments: [], manifest: [], requestedFiles: [], contentCache: new Map(), originals: new Map(), proposedContents: new Map(), searches: [], inspectedFiles: [], plan: [], files: [], explanations: [], limitations: [], stages: (Object.keys(stageLabels) as StageId[]).map((id) => ({ id, label: stageLabels[id], status: "pending" })), activity: [], filesIndexed: 0, explorationRounds: 0, staticRepairCount: 0, revisionCount: 0, summary: "", patchVersions: [], requirements: [] }; }
 function emitters(state: AgentRunState, emit: (event: RunEvent) => void, started: number) {
   const elapsed = () => Date.now() - started;
   const stage = (id: StageId, status: Stage["status"] | "investigating" | "completed" | "warning") => { const item = state.stages.find((candidate) => candidate.id === id)!; item.status = status === "investigating" ? "active" : status === "completed" ? "complete" : status === "warning" ? "failed" : status; if (status !== "pending") item.elapsedMs = elapsed(); emit({ type: "stage", stage: { ...item } }); };
@@ -219,23 +261,57 @@ function fallbackQueries(state: AgentRunState) {
     .filter((query) => !prior.has(normalizedTarget(query))));
 }
 
-function buildFiles(proposal: CoderResponse, originals: Map<string, string>, approvedPaths: Set<string>, requirements: StructuredRequirement[] = []) {
+function isSafeRelativePath(path: string) {
+  return Boolean(path) && !path.startsWith("/") && !/^[a-z]:\//i.test(path) && !path.split("/").some((part) => !part || part === "." || part === "..");
+}
+
+function creationRoots(state: AgentRunState) {
+  const roots = new Set<string>();
+  for (const path of state.manifest.map((file) => file.path)) {
+    const [first] = path.split("/");
+    if (first && !IGNORED_PATH.test(first)) roots.add(first);
+  }
+  return [...roots].filter((root) => /^(src|lib|test|tests|__tests__|types|packages|apps)$/i.test(root)).slice(0, 12);
+}
+
+function requestedApiSymbols(state: AgentRunState) {
+  const symbols = new Set<string>();
+  for (const requirement of state.requirements.filter((item) => item.type === "mustImplement")) {
+    for (const symbol of state.analysis?.importantSymbols ?? []) {
+      const clean = symbol.replace(/\(.*$/, "").trim();
+      if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(clean) && new RegExp(`\\b${clean}\\b`).test(requirement.text)) symbols.add(clean);
+    }
+    for (const match of requirement.text.matchAll(/`([A-Za-z_$][A-Za-z0-9_$]*)`|\b([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g)) symbols.add(match[1] || match[2]);
+  }
+  return [...symbols].filter((symbol) => !["if", "for", "while", "switch", "require", "import", "export", "default"].includes(symbol));
+}
+
+function buildFiles(proposal: CoderResponse, originals: Map<string, string>, approvedPaths: Map<string, "create" | "modify" | "delete">, requirements: StructuredRequirement[] = []) {
   const edits = proposal.changes.map((edit) => ({ ...edit, path: canonicalPath(edit.path) }));
   if (!edits.length || edits.length > MAX_CHANGED_FILES || new Set(edits.map((edit) => edit.path)).size !== edits.length) return { reason: "The coder returned no changes or duplicated file paths." };
   const files: FileChange[] = [];
   for (const edit of edits) {
-    if (!approvedPaths.has(edit.path) || !originals.has(edit.path) || Buffer.byteLength(edit.updatedContent, "utf8") > MAX_FILE_BYTES) return { reason: "The coder proposed unchanged content or an edit outside the approved inspected-file scope." };
-    if (edit.updatedContent === originals.get(edit.path)) continue;
-    const role = edit.role || classifyFileRole(edit.path);
-    const covered = edit.requirementsCovered && edit.requirementsCovered.length > 0
-      ? edit.requirementsCovered
-      : requirements.filter((r) => (r.type === "mustImplement" && role === "source") || (r.type === "mustTest" && role === "test") || r.type === "mustPreserve").map((r) => r.id);
+    const approvedOperation = approvedPaths.get(edit.path);
+    if (!edit.path || edit.path.startsWith("/") || edit.path.split("/").some((part) => part === "..") || !approvedOperation || approvedOperation !== edit.operation || Buffer.byteLength(edit.updatedContent, "utf8") > MAX_FILE_BYTES) return { reason: "PATCH_SCOPE_VIOLATION: The coder proposed an unapproved path or operation." };
+    const original = originals.get(edit.path);
+    if (edit.operation === "create" && original !== undefined) return { reason: `PATCH_SCOPE_VIOLATION: Creation path already exists: ${edit.path}.` };
+    if ((edit.operation === "modify" || edit.operation === "delete") && original === undefined) return { reason: `CODER_STEP_BLOCKED: ${edit.operation} requires inspected original content for ${edit.path}.` };
+    if (edit.operation === "delete" && edit.updatedContent !== "") return { reason: `CODER_STEP_BLOCKED: Deleted file ${edit.path} must not include replacement content.` };
+    if (edit.operation !== "delete" && edit.updatedContent === original) continue;
+    const role = classifyFileRole(edit.path);
+    const covered = [...new Set(edit.requirementsCovered)];
+    if (!covered.length || covered.some((id) => !requirements.some((requirement) => requirement.id === id))) {
+      return { reason: "CODER_STEP_BLOCKED: The coder returned missing or unknown requirement coverage." };
+    }
     files.push({
       path: edit.path,
-      ...proposedDiff(edit.path, originals.get(edit.path)!, edit.updatedContent),
+      operation: edit.operation,
+      ...proposedDiff(edit.path, edit.operation === "create" ? null : original!, edit.operation === "delete" ? null : edit.updatedContent),
       reason: edit.explanation,
       role,
       requirementsCovered: covered,
+      originalContent: edit.operation === "create" ? null : original!,
+      updatedContent: edit.operation === "delete" ? null : edit.updatedContent,
     });
   }
   return files.length ? { files } : { reason: "The coder returned no source changes." };
@@ -244,16 +320,16 @@ function buildFiles(proposal: CoderResponse, originals: Map<string, string>, app
 async function understandIssue(state: AgentRunState, issueUrl: string, client: GithubClient, emit: (event: RunEvent) => void, tools: ReturnType<typeof emitters>) {
   const input = parseIssueUrl(issueUrl); const encoded = `${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}`; tools.stage("understanding", "investigating");
   const [issue, repo] = await Promise.all([client<GithubIssue>(`/repos/${encoded}/issues/${input.number}`), client<GithubRepo>(`/repos/${encoded}`)]);
-  if (issue.pull_request) fail("pull_request", "That link is a pull request", "Paste a public GitHub issue URL instead."); if (issue.state === "closed") fail("closed_issue", "Issue is closed", "Choose an open issue so Codex Pilot can investigate an unresolved problem."); if (repo.private) fail("private_repository", "Repository is private", "Codex Pilot currently supports public repositories only."); if (repo.archived || repo.disabled) fail("repository_unavailable", "Repository unavailable", "This repository is archived or unavailable."); if (repo.size > MAX_REPO_KB) fail("REPOSITORY_TOO_LARGE", "Repository too large", "This repository exceeds the 25 MB exploration limit. Try a smaller public repository.");
-  const languageMap = await client<Record<string, number>>(`/repos/${encoded}/languages`); state.issueData = issue; state.issue = { number: issue.number, title: issue.title, repository: `${input.owner}/${input.repo}`, url: issue.html_url }; state.repository = { branch: repo.default_branch, language: Object.entries(languageMap).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "Unknown", public: true, url: repo.html_url }; emit({ type: "context", issue: state.issue, repository: state.repository }); tools.activity("understanding", "Parsed issue requirements", `Loaded issue #${issue.number} and its description.`);
+  if (issue.pull_request) fail("pull_request", "That link is a pull request", "Paste a public GitHub issue URL instead."); if (issue.state === "closed") fail("closed_issue", "Issue is closed", "Choose an open issue so Codex Pilot can investigate an unresolved problem."); if (repo.private) fail("private_repository", "Repository is private", "Codex Pilot currently supports public repositories only."); if (repo.archived || repo.disabled) fail("repository_unavailable", "Repository unavailable", "This repository is archived or unavailable.");
+  const [languageMap, commit] = await Promise.all([client<Record<string, number>>(`/repos/${encoded}/languages`), client<GithubCommit>(`/repos/${encoded}/commits/${encodeURIComponent(repo.default_branch)}`)]); const languages = Object.entries(languageMap).sort((a, b) => b[1] - a[1]); const language = languages[0]?.[0] ?? "Unknown"; if (!languages.some(([name]) => /^(JavaScript|TypeScript)$/i.test(name))) fail("REPOSITORY_UNSUPPORTED", "Unsupported repository language", `Codex Pilot currently supports JavaScript, TypeScript, and common Node projects. GitHub reported ${languages.map(([name]) => name).join(", ") || "no supported source language"}.`); if (!/^[0-9a-f]{7,64}$/i.test(commit.sha)) fail("REPOSITORY_UNSUPPORTED", "Repository revision unavailable", "GitHub did not provide a stable commit SHA for the default branch.", true); state.issueData = issue; state.issue = { number: issue.number, title: issue.title, repository: `${input.owner}/${input.repo}`, url: issue.html_url }; state.repository = { branch: repo.default_branch, commit: commit.sha, language, public: true, url: repo.html_url }; emit({ type: "context", issue: state.issue, repository: state.repository }); tools.activity("understanding", "Captured repository revision", `Loaded issue #${issue.number} at ${commit.sha.slice(0, 12)}.`); if (repo.size > MAX_REPO_KB) tools.activity("understanding", "Large repository strategy", `Repository reports ${(repo.size / 1024).toFixed(1)} MB; investigation will use the issue-scoped subtree limit.`);
   state.comments = issue.comments ? await client<{ body: string; author_association?: string }[]>(`/repos/${encoded}/issues/${input.number}/comments?per_page=100`) : []; state.comments.sort((a, b) => Number(/OWNER|MEMBER|COLLABORATOR/.test(b.author_association ?? "")) - Number(/OWNER|MEMBER|COLLABORATOR/.test(a.author_association ?? ""))); tools.activity("understanding", "Read discussion", state.comments.length ? `Read ${state.comments.length} issue comment${state.comments.length === 1 ? "" : "s"}.` : "No issue comments were present."); tools.stage("understanding", "completed"); return { encoded };
 }
 
 async function scanRepository(state: AgentRunState, encoded: string, client: GithubClient, tools: ReturnType<typeof emitters>) {
-  tools.stage("exploring", "investigating"); const tree = await client<{ tree: TreeItem[]; truncated: boolean }>(`/repos/${encoded}/git/trees/${encodeURIComponent(state.repository!.branch)}?recursive=1`); if (tree.truncated || tree.tree.length > MAX_TREE_ENTRIES) fail("repository_too_large", "Repository too large", "Codex Pilot found more source entries than this prototype can explore safely."); state.filesIndexed = sourceFiles(tree.tree, state.analysis).length; state.manifest = sourceFiles(tree.tree, state.analysis).map((item) => ({ path: item.path, matches: [], score: 0 })); state.structure = repositoryStructure(tree.tree.map((item) => item.path)); state.manifest = rankedCandidates(state); if (!state.manifest.length) fail("unsupported_files", "No supported source files found", "The repository has no safely inspectable source files for this issue."); tools.activity("exploring", "Scanned repository tree", `${state.filesIndexed} candidate source files discovered on ${state.repository!.branch}.`);
+  tools.stage("exploring", "investigating"); const tree = await client<{ tree: TreeItem[]; truncated: boolean }>(`/repos/${encoded}/git/trees/${encodeURIComponent(state.repository!.commit!)}?recursive=1`); if (tree.truncated) fail("REPOSITORY_TOO_LARGE", "Repository tree is truncated", "GitHub returned an incomplete repository tree, so Codex Pilot cannot safely scope this issue."); const scopedTree = scopeLargeTree(tree.tree, state.analysis!); if (!scopedTree) fail("REPOSITORY_TOO_LARGE", "Repository too large to scope safely", "This repository exceeds the exploration limit and the issue does not identify a bounded package or subtree."); if (scopedTree.length < tree.tree.length) tools.activity("exploring", "Scoped large repository", `Limited analysis to ${scopedTree.length} entries under issue-referenced paths.`); state.filesIndexed = sourceFiles(scopedTree, state.analysis).length; state.manifest = sourceFiles(scopedTree, state.analysis).map((item) => ({ path: item.path, matches: [], score: 0 })); state.structure = repositoryStructure(tree.tree.map((item) => item.path)); state.manifest = rankedCandidates(state); if (!state.manifest.length) fail("REPOSITORY_UNSUPPORTED", "No supported source files found", "The repository has no safely inspectable JavaScript or TypeScript source files for this issue."); tools.activity("exploring", "Scanned repository tree", `${state.filesIndexed} candidate source files discovered at ${state.repository!.commit!.slice(0, 12)}.`);
 }
 
-async function fetchContent(state: AgentRunState, encoded: string, path: string, client: GithubClient) { const existing = state.contentCache.get(path); if (existing !== undefined) return existing; const content = await client<string>(`/repos/${encoded}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(state.repository!.branch)}`, true); if (Buffer.byteLength(content, "utf8") > MAX_FILE_BYTES) return ""; state.contentCache.set(path, content); return content; }
+async function fetchContent(state: AgentRunState, encoded: string, path: string, client: GithubClient) { const existing = state.contentCache.get(path); if (existing !== undefined) return existing; const content = await client<string>(`/repos/${encoded}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(state.repository!.commit!)}`, true); if (Buffer.byteLength(content, "utf8") > MAX_FILE_BYTES) return ""; state.contentCache.set(path, content); return content; }
 
 async function searchRepository(state: AgentRunState, encoded: string, queries: string[], client: GithubClient, tools: ReturnType<typeof emitters>, emit: (event: RunEvent) => void, repeatSearches: string[] = []) {
   const remaining = MAX_SEARCHES - state.searches.length; const previous = new Set(state.searches.map((search) => normalizedTarget(search.query))); const allowedRepeats = new Set(repeatSearches.map(normalizedTarget)); const concreteQueries = normalizedQueries(queries).filter((query) => !previous.has(normalizedTarget(query)) || allowedRepeats.has(normalizedTarget(query))).slice(0, remaining); const combined = new Map<string, RankedPath>();
@@ -333,11 +409,12 @@ async function createPlan(state: AgentRunState, encoded: string, client: GithubC
       inspectedFiles: state.inspectedFiles,
       contents: Object.fromEntries(state.originals),
       filesAvailableToChange: [...state.originals.keys()],
+      creationRoots: creationRoots(state),
     };
 
     const result = await responseJson<PlannerResponse>(
       codex,
-      "You are the implementation planner for Codex Pilot. The evidence gate has determined that evidence is ready_to_patch. Ground your plan in the validated findings, exact inspected contents, and requirements contract. Each step needs file, action, and reason, and may specify requirementsCovered (e.g. ['R1']). Use exact repository-relative paths from filesAvailableToChange. filesAllowedToChange must contain all and only step files. For implementation issues, at least one step must modify a production/source code file (not just tests or docs). Only block if there is a concrete contradiction between the issue requirements and repository facts. Reading tests is allowed and proposed test source changes are allowed; never propose executing tests or the repository. Correct validationErrors if provided.",
+      "You are the implementation planner for Codex Pilot. The evidence gate has determined that evidence is ready_to_patch. Ground your plan in the validated findings, exact inspected contents, and requirements contract. Each step needs file, operation (create, modify, or delete), action, reason, and explicit requirementsCovered IDs (e.g. ['R1']). modify/delete paths must be exact inspected repository-relative paths from filesAvailableToChange. create paths must be new, repository-relative source/test/type paths beneath creationRoots. filesAllowedToChange must contain all and only step files. For implementation issues, at least one step must change production implementation code (source, config, or declarations), not only tests or docs. Only block if there is a concrete contradiction between the issue requirements and repository facts. Reading tests is allowed and proposed test source changes are allowed; never propose executing tests or the repository. Correct validationErrors if provided.",
       JSON.stringify({ ...input, previousPlan, validationErrors: errors }),
       plannerSchema
     );
@@ -345,19 +422,23 @@ async function createPlan(state: AgentRunState, encoded: string, client: GithubC
     const allowed = new Set(result.filesAllowedToChange.map(canonicalPath));
     const stepPaths = new Set(steps.map((step) => step.file));
     errors = [
-      ...[...new Set([...allowed, ...stepPaths])].filter((path) => !state.originals.has(path)).map((path) => `File was not inspected: ${path}`),
+      ...steps.filter((step) => !isSafeRelativePath(step.file)).map((step) => `PLAN_INVALID_PATH: Unsafe path: ${step.file}`),
+      ...steps.filter((step) => step.operation !== "create" && !state.originals.has(step.file)).map((step) => `File was not inspected: ${step.file}`),
+      ...steps.filter((step) => step.operation === "create" && (state.originals.has(step.file) || state.manifest.some((file) => file.path === step.file))).map((step) => `PLAN_INVALID_PATH: Creation path already exists: ${step.file}`),
+      ...steps.filter((step) => step.operation === "create" && !creationRoots(state).some((root) => step.file.startsWith(`${root}/`))).map((step) => `PLAN_INVALID_PATH: New file must be beneath an approved creation root: ${step.file}`),
       ...[...stepPaths].filter((path) => !allowed.has(path)).map((path) => `Step file missing from filesAllowedToChange: ${path}`),
       ...[...allowed].filter((path) => !stepPaths.has(path)).map((path) => `Allowed file has no plan step: ${path}`),
+      ...(steps.length !== stepPaths.size ? ["PLAN_INVALID_PATH: A file may appear in only one plan step."] : []),
     ];
 
-    const hasSourceStep = steps.some((step) => classifyFileRole(step.file) === "source");
-    if (isImplementationIssue(state.analysis) && !hasSourceStep) {
-      errors.push("SOURCE_CHANGE_REQUIRED: Implementation issue requires at least one production source file modification, but the plan only targets test/doc/config files.");
+    const hasImplementationStep = steps.some((step) => ["source", "config", "types"].includes(classifyFileRole(step.file)));
+    if (isImplementationIssue(state.analysis) && !hasImplementationStep) {
+      errors.push("SOURCE_CHANGE_REQUIRED: Implementation issue requires at least one production implementation, config, or declaration change, but the plan only targets tests or docs.");
     }
 
     if (errors.length) {
       // If planner referenced repository files that were not yet inspected, back-route to targeted exploration once
-      const missingRepoFiles = [...new Set([...allowed, ...stepPaths])].filter((path) => !state.originals.has(path) && state.manifest.some((file) => file.path === path));
+      const missingRepoFiles = steps.filter((step) => step.operation !== "create").map((step) => step.file).filter((path) => !state.originals.has(path) && state.manifest.some((file) => file.path === path));
       if (!routedBack && missingRepoFiles.length > 0 && state.inspectedFiles.length < MAX_FILES_INSPECTED) {
         routedBack = true;
         tools.activity("planning", "Back-routing to exploration", `Missing evidence for plan: inspecting ${missingRepoFiles.slice(0, MAX_FILES_PER_ROUND).join(", ")}.`);
@@ -377,25 +458,28 @@ async function createPlan(state: AgentRunState, encoded: string, client: GithubC
       continue;
     }
 
-    // Map requirements to steps
+    // Coverage is a contract, never an inference from a filename or action.
+    const knownRequirements = new Map(state.requirements.map((requirement) => [requirement.id, requirement]));
     const mappedReqIds = new Set<string>();
     for (const step of steps) {
-      const covered = new Set(step.requirementsCovered || []);
-      for (const req of state.requirements) {
-        if (covered.has(req.id)) {
-          mappedReqIds.add(req.id);
-          continue;
-        }
-        const fileRole = classifyFileRole(step.file);
-        const textLower = (step.action + " " + step.reason + " " + step.file).toLowerCase();
-        const reqWords = req.text.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
-        const matchesWord = reqWords.some((w) => textLower.includes(w));
-        if (matchesWord || (req.type === "mustImplement" && fileRole === "source") || (req.type === "mustTest" && fileRole === "test")) {
-          covered.add(req.id);
-          mappedReqIds.add(req.id);
-        }
+      const covered = [...new Set(step.requirementsCovered || [])];
+      const role = classifyFileRole(step.file);
+      for (const requirementId of covered) {
+        const requirement = knownRequirements.get(requirementId);
+        if (!requirement) errors.push(`Unknown requirement ID in plan: ${requirementId}`);
+        else if (requirement.type === "mustTest" && role !== "test") errors.push(`Test requirement ${requirementId} must map to a test file: ${step.file}`);
+        else if (requirement.type === "mustImplement" && !["source", "config", "types"].includes(role)) errors.push(`Implementation requirement ${requirementId} must map to implementation, config, or declaration code: ${step.file}`);
+        else mappedReqIds.add(requirementId);
       }
-      step.requirementsCovered = [...covered];
+      step.requirementsCovered = covered;
+    }
+    for (const requirement of state.requirements.filter((item) => item.type !== "optionalDocs")) {
+      if (!mappedReqIds.has(requirement.id)) errors.push(`PLAN_REQUIREMENT_UNMAPPED: ${requirement.id} has no explicit compatible plan step.`);
+    }
+    if (errors.length) {
+      previousPlan = result;
+      tools.activity("planning", attempt === 0 ? "Repairing plan mapping" : "Plan mapping failed", errors.join("; "), "warning");
+      continue;
     }
 
     for (const req of state.requirements) {
@@ -410,6 +494,7 @@ async function createPlan(state: AgentRunState, encoded: string, client: GithubC
       title: step.action,
       detail: step.reason,
       paths: [step.file],
+      operation: step.operation,
       status: "pending",
       requirementsCovered: step.requirementsCovered,
     }));
@@ -427,24 +512,24 @@ async function generatePatch(state: AgentRunState, codex: CodexRunner, tools: Re
   tools.stage(stageId, "investigating");
   state.plan.forEach((step) => { step.status = "investigating"; });
   emit({ type: "plan", plan: state.plan });
-  const approved = new Set(state.plan.flatMap((step) => step.paths ?? []));
+  const approved = new Map(state.plan.flatMap((step) => (step.paths ?? []).map((path) => [path, step.operation || "modify"] as const)));
   const originalContents = [...state.originals].filter(([path]) => approved.has(path)).map(([path, content]) => `--- ${path}\n${content}`).join("\n\n");
   const coderInstructions = feedback
-    ? "You are the coder for Codex Pilot revising a proposed patch based on reviewer feedback or static gate check failure. Return changes with path, updatedContent, explanation, role ('source' | 'test' | 'docs' | 'config' | 'generated'), and requirementsCovered containing minimal updated full-file contents ONLY for the approved files provided. Strictly modify only the files approved in the plan. Do not touch documentation (such as README.md, docs, or changelogs) or unrelated files unless the issue explicitly demands documentation changes. Address reviewer/gate feedback directly while preserving all already-correct changes. Preserve existing public APIs and backward compatibility unless the issue requires a change. Do not create files, run code, or claim tests."
-    : "You are the coder for Codex Pilot. Return changes with path, updatedContent, explanation, role ('source' | 'test' | 'docs' | 'config' | 'generated'), and requirementsCovered containing minimal updated full-file contents ONLY for the approved files provided. Strictly modify only the files approved in the plan. Do not touch documentation (e.g. README.md) or unrelated files unless the issue explicitly requires documentation changes. Preserve existing public APIs unless the issue requires a change. Do not create files, run code, or claim tests. Do not fabricate missing repository knowledge.";
+    ? "You are the coder for Codex Pilot revising a proposed patch based on reviewer feedback or a static gate failure. Return changes with path, operation ('create' | 'modify' | 'delete'), updatedContent, explanation, role, and explicit requirementsCovered IDs. Return complete full-file content for create/modify; for delete use updatedContent: ''. Make every approved plan step real in the complete revised change set. Strictly use only the exact approved path and operation pair. Do not touch unrelated documentation or files. Address feedback while preserving correct prior changes and public APIs. Do not run code or claim tests."
+    : "You are the coder for Codex Pilot. Return changes with path, operation ('create' | 'modify' | 'delete'), updatedContent, explanation, role, and explicit requirementsCovered IDs. Return complete full-file content for create/modify; for delete use updatedContent: ''. Make every approved plan step real in the change set. Strictly use only the exact approved path and operation pair. Do not touch unrelated documentation or files unless explicitly required. Preserve public APIs unless the issue requires change. Do not run code, claim tests, or fabricate repository knowledge.";
 
   const reqChecklist = state.requirements.map((r) => ({ id: r.id, type: r.type, text: r.text, status: r.status }));
 
   const proposal = await responseJson<CoderResponse>(
     codex,
     coderInstructions,
-    `${compactIssue(state)}\n\nREQUIREMENTS CONTRACT\n${JSON.stringify(reqChecklist, null, 2)}\n\nEVIDENCE PACKAGE\n${evidenceSummary(state.evidence)}\n\nPLAN\n${state.plan.map((step) => `${step.title}: ${step.detail}\nPaths: ${step.paths?.join(", ")}${step.requirementsCovered?.length ? `\nRequirements: ${step.requirementsCovered.join(", ")}` : ""}`).join("\n\n")}\n\nAPPROVED ORIGINAL FILES\n${originalContents}${feedback ? `\n\nPREVIOUS PROPOSED CONTENTS\n${JSON.stringify(Object.fromEntries(state.proposedContents))}\n\nREVIEWER FEEDBACK\n${feedback}\nReturn the complete revised change set, retaining correct prior changes.` : ""}`,
+    `${compactIssue(state)}\n\nREQUIREMENTS CONTRACT\n${JSON.stringify(reqChecklist, null, 2)}\n\nEVIDENCE PACKAGE\n${evidenceSummary(state.evidence)}\n\nPLAN\n${state.plan.map((step) => `${step.title}: ${step.detail}\nPath: ${step.paths?.join(", ")}\nOperation: ${step.operation}${step.requirementsCovered?.length ? `\nRequirements: ${step.requirementsCovered.join(", ")}` : ""}`).join("\n\n")}\n\nAPPROVED PATH / OPERATION PAIRS\n${JSON.stringify(Object.fromEntries(approved), null, 2)}\n\nAPPROVED ORIGINAL FILES\n${originalContents}${feedback ? `\n\nPREVIOUS PROPOSED CONTENTS\n${JSON.stringify(Object.fromEntries(state.proposedContents))}\n\nREVIEWER FEEDBACK\n${feedback}\nReturn the complete revised change set, retaining correct prior changes.` : ""}`,
     coderSchema
   );
   const built = buildFiles(proposal, state.originals, approved, state.requirements);
   if (!("files" in built) || !built.files) return { ok: false, reason: built.reason || "The coder could not produce a safe patch." };
   state.files = built.files;
-  state.proposedContents = new Map(proposal.changes.map((edit) => [canonicalPath(edit.path), edit.updatedContent]));
+  state.proposedContents = new Map(state.files.map((file) => [file.path, file.updatedContent ?? null]));
   state.explanations = state.files.map((file) => ({ path: file.path, explanation: file.reason, coverage: ["Proposed change reviewed against the issue requirements"] }));
 
   // Update requirement status based on generated files
@@ -455,7 +540,7 @@ async function generatePatch(state: AgentRunState, codex: CodexRunner, tools: Re
       if (req) {
         if (!req.coveredByFiles) req.coveredByFiles = [];
         if (!req.coveredByFiles.includes(file.path)) req.coveredByFiles.push(file.path);
-        if (role === "source" && req.type === "mustImplement") {
+        if (["source", "config", "types"].includes(role) && req.type === "mustImplement") {
           req.status = "implemented";
         } else if (role === "test" && req.type === "mustTest") {
           req.status = "tested";
@@ -465,7 +550,7 @@ async function generatePatch(state: AgentRunState, codex: CodexRunner, tools: Re
   }
   emit({ type: "requirements", requirements: state.requirements });
 
-  state.files.forEach((file) => tools.activity(stageId, `Modified ${file.path}`, `Proposed edit (+${file.additions} -${file.deletions}).`));
+  state.files.forEach((file) => tools.activity(stageId, `${file.operation[0].toUpperCase()}${file.operation.slice(1)}d ${file.path}`, `Proposed ${file.operation} (+${file.additions} -${file.deletions}).`));
   tools.activity(stageId, feedback ? "Generated revised diff" : "Generated unified diff", `Built a reviewable patch from ${state.files.length} approved source file${state.files.length === 1 ? "" : "s"}.`);
   state.plan.forEach((step) => { step.status = "completed"; });
   emit({ type: "plan", plan: state.plan });
@@ -484,9 +569,10 @@ async function generatePatch(state: AgentRunState, codex: CodexRunner, tools: Re
     }];
   } else {
     state.revisedPatch = patch;
+    const version = state.patchVersions.length + 1;
     state.patchVersions.push({
-      version: 2,
-      label: "Patch v2 (Revised)",
+      version,
+      label: `Patch v${version} (Revised)`,
       patch,
       files: [...state.files],
       explanations: [...state.explanations],
@@ -499,18 +585,19 @@ async function generatePatch(state: AgentRunState, codex: CodexRunner, tools: Re
 
 type StaticCheckResult =
   | { ok: true }
-  | { ok: false; code: "TEST_ONLY_PATCH" | "API_EXPORT_MISSING" | "PATCH_SCOPE_VIOLATION" | "CODER_MISSING_IMPLEMENTATION"; reason: string };
+  | { ok: false; code: "TEST_ONLY_PATCH" | "API_EXPORT_MISSING" | "PATCH_SCOPE_VIOLATION" | "CODER_MISSING_IMPLEMENTATION" | "PUBLIC_EXPORT_MISSING"; reason: string };
 
 function validatePatchStatic(files: FileChange[], state: AgentRunState): StaticCheckResult {
   const isImpl = isImplementationIssue(state.analysis);
   const sourceChanges = files.filter((f) => (f.role || classifyFileRole(f.path)) === "source");
+  const implementationChanges = files.filter((f) => ["source", "config", "types"].includes(f.role || classifyFileRole(f.path)));
 
   // 1. Implementation issue must modify at least one production source file
-  if (isImpl && sourceChanges.length === 0) {
+  if (isImpl && implementationChanges.length === 0) {
     return {
       ok: false,
       code: "TEST_ONLY_PATCH",
-      reason: "TEST_ONLY_PATCH: This issue requires modifying production/source code, but the patch only modified test, documentation, or configuration files.",
+      reason: "TEST_ONLY_PATCH: This issue requires an implementation, configuration, or declaration change, but the patch only modified tests or documentation.",
     };
   }
 
@@ -529,25 +616,15 @@ function validatePatchStatic(files: FileChange[], state: AgentRunState): StaticC
   }
 
   // 3. Required exports / symbols existence check
-  if (isImpl && state.analysis?.importantSymbols?.length) {
-    for (const sym of state.analysis.importantSymbols) {
-      const cleanSym = sym.replace(/\(.*$/, "").trim();
-      if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(cleanSym) && !["require", "import", "export", "default"].includes(cleanSym)) {
-        let found = false;
-        for (const sf of sourceChanges) {
-          const updatedContent = state.proposedContents.get(sf.path) || "";
-          if (symbolExistsInSource(cleanSym, sf.diff, updatedContent)) {
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          return {
-            ok: false,
-            code: "API_EXPORT_MISSING",
-            reason: `API_EXPORT_MISSING: Required symbol '${cleanSym}' is missing from the modified production source files.`,
-          };
-        }
+  if (isImpl) {
+    for (const cleanSym of requestedApiSymbols(state)) {
+      const found = sourceChanges.some((sf) => symbolExistsInSource(cleanSym, sf.diff, state.proposedContents.get(sf.path) || ""));
+      if (!found) {
+        return {
+          ok: false,
+          code: "API_EXPORT_MISSING",
+          reason: `API_EXPORT_MISSING: Requested API symbol '${cleanSym}' is missing from the modified production source files.`,
+        };
       }
     }
   }
@@ -569,20 +646,36 @@ function validatePatchStatic(files: FileChange[], state: AgentRunState): StaticC
     }
   }
 
-  // 5. MustImplement requirements coverage check
-  if (isImpl) {
-    for (const req of state.requirements.filter((r) => r.type === "mustImplement")) {
-      const covered = files.some((f) => {
-        const role = f.role || classifyFileRole(f.path);
-        return role === "source" && (!f.requirementsCovered || f.requirementsCovered.length === 0 || f.requirementsCovered.includes(req.id));
-      });
-      if (!covered) {
-        return {
-          ok: false,
-          code: "CODER_MISSING_IMPLEMENTATION",
-          reason: `CODER_MISSING_IMPLEMENTATION: Requirement '${req.id}: ${req.text}' has no corresponding production source code change.`,
-        };
-      }
+  // 5. Every mandatory requirement must remain explicitly represented.
+  for (const requirement of state.requirements.filter((item) => item.type !== "optionalDocs")) {
+    const covered = files.some((file) => {
+      const role = file.role || classifyFileRole(file.path);
+      if (!(file.requirementsCovered || []).includes(requirement.id)) return false;
+      if (requirement.type === "mustTest") return role === "test";
+      if (requirement.type === "mustImplement") return ["source", "config", "types"].includes(role);
+      return true;
+    });
+    if (!covered) {
+      return {
+        ok: false,
+        code: "CODER_MISSING_IMPLEMENTATION",
+        reason: `CODER_MISSING_IMPLEMENTATION: Requirement '${requirement.id}: ${requirement.text}' has no compatible generated change.`,
+      };
+    }
+  }
+
+  // A generated patch must represent every approved plan step, including its
+  // operation and each explicitly mapped requirement. This closes the
+  // requirement -> plan -> code gap before a reviewer sees the proposal.
+  for (const step of state.plan) {
+    const path = step.paths?.[0];
+    const change = path ? files.find((file) => file.path === path) : undefined;
+    if (!change || change.operation !== (step.operation || "modify")) {
+      return { ok: false, code: "CODER_MISSING_IMPLEMENTATION", reason: `CODER_MISSING_IMPLEMENTATION: Plan step ${step.id} (${path || "unknown path"}) was not implemented with its approved operation.` };
+    }
+    const missing = (step.requirementsCovered || []).filter((id) => !(change.requirementsCovered || []).includes(id));
+    if (missing.length) {
+      return { ok: false, code: "CODER_MISSING_IMPLEMENTATION", reason: `CODER_MISSING_IMPLEMENTATION: Plan step ${step.id} omitted requirement coverage ${missing.join(", ")}.` };
     }
   }
 
@@ -615,15 +708,10 @@ async function reviewPatch(state: AgentRunState, codex: CodexRunner, tools: Retu
         else if (req.type === "mustImplement") req.status = "implemented";
       }
     } else {
-      if (result.requirementsCovered === false && req.type === "mustImplement") {
-        req.status = "failed";
-        anyReqFailed = true;
-      } else if (result.requirementsCovered === true) {
-        if (req.type === "mustPreserve") req.status = "preserved";
-        else if (req.type === "mustTest") req.status = "tested";
-        else if (req.type === "mustImplement") req.status = "implemented";
-        req.reviewVerdict = "pass";
-      }
+      req.status = "failed";
+      req.reviewVerdict = "fail";
+      req.detail = `Reviewer omitted coverage for ${req.id}.`;
+      anyReqFailed = true;
     }
   }
   emit({ type: "requirements", requirements: state.requirements });
@@ -782,8 +870,9 @@ function finishStages(state: AgentRunState, tools: ReturnType<typeof emitters>, 
 }
 
 export async function streamPilotRun(issueUrl: string, emit: (event: RunEvent) => void, dependencies: PilotDependencies = {}) {
-  const state = createState(); const client = dependencies.github ?? github; const codex = dependencies.runCodex ?? runCodex; const tools = emitters(state, emit, Date.now());
+  const state = createState(); const client = cachedGithubClient(dependencies.github ?? github); const codex = dependencies.runCodex ?? runCodex; const tools = emitters(state, emit, Date.now());
   try {
+    if (!dependencies.runCodex) await requireCodexAuthentication();
     const { encoded } = await understandIssue(state, issueUrl, client, emit, tools);
     state.analysis = await responseJson<IssueAnalysis>(codex, "Classify this GitHub issue and extract expected versus observed behavior, exact symbols, paths, errors, evidence surfaces, reproduction details, approaches and constraints. OWNER, MEMBER and COLLABORATOR comments are maintainer clarifications; other comments are unverified proposals. Do not invent facts, paths, or maintainer statements. Use empty arrays for absent information.", compactIssue(state), analysisSchema);
     tools.activity("understanding", "Classified issue", state.analysis.kinds.join(", ") + ": " + state.analysis.summary);
@@ -830,8 +919,8 @@ export async function streamPilotRun(issueUrl: string, emit: (event: RunEvent) =
     let staticCheck = validatePatchStatic(state.files, state);
     if (!staticCheck.ok) {
       tools.activity("writing", "Static gate check", staticCheck.reason, "warning");
-      if (state.revisionCount < MAX_REVISION_ROUNDS) {
-        state.revisionCount = 1;
+      if (state.staticRepairCount < MAX_REVISION_ROUNDS) {
+        state.staticRepairCount += 1;
         tools.stage("revising", "investigating");
         tools.activity("revising", "Repairing static gate failure", staticCheck.reason);
         const revision = await generatePatch(
@@ -876,7 +965,7 @@ export async function streamPilotRun(issueUrl: string, emit: (event: RunEvent) =
 
     let verdict = await reviewPatch(state, codex, tools, emit);
     if (verdict === "revise") {
-      state.revisionCount = 1;
+      state.revisionCount += 1;
       tools.activity("reviewing", "Revision requested", state.review?.feedback?.join(" ") || "Reviewer found a focused concern.", "warning");
       tools.stage("reviewing", "warning");
       tools.stage("revising", "investigating");

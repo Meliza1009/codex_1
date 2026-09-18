@@ -26,4 +26,10 @@ Open `http://localhost:3000`. Add `GITHUB_TOKEN` to `.env.local` if GitHub’s u
 - The agent may replace content only in a file it inspected. Codex Pilot validates the replacements and generates the diff itself.
 - Target repositories are never cloned, executed, tested, or modified.
 
+## QA status
+
+Codex Pilot labels generated changes **PATCH PROPOSED — NOT EXECUTED**. It captures the analyzed commit SHA and preserves the canonical diff and review record; apply the downloaded patch and run repository-defined QA in an approved developer environment.
+
+The deterministic regression suite covers explicit requirement-to-plan-to-patch coverage, stable revision pinning, planner repair, patch persistence, bounded revisions, and manual-QA-only verification behavior.
+
 If Codex cannot return a supported, confident edit, the app clearly refuses to offer an empty patch. GitHub rate limits, private or missing repositories, closed issues, unsupported files, and large repositories receive dedicated failure states.
