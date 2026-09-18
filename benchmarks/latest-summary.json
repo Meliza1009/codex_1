@@ -1,0 +1,157 @@
+{
+  "testedAt": "2026-09-18",
+  "status": "blocked_by_github_rate_limit",
+  "productionReadiness": "unproven",
+  "results": [
+    {
+      "url": "https://github.com/developit/mitt/issues/136",
+      "group": "medium",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/developit/mitt/issues/202",
+      "group": "medium",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/developit/mitt/issues/210",
+      "group": "simple",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/google/uuid/issues/193",
+      "group": "simple",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/lukeed/clsx/issues/111",
+      "group": "medium",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/lukeed/clsx/issues/112",
+      "group": "out_of_scope",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/lukeed/clsx/issues/52",
+      "group": "simple",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/lukeed/clsx/issues/92",
+      "group": "iterative",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/lukeed/clsx/issues/97",
+      "group": "iterative",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/lukeed/klona/issues/39",
+      "group": "out_of_scope",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/lukeed/klona/issues/43",
+      "group": "medium",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/lukeed/klona/issues/44",
+      "group": "medium",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/lukeed/klona/issues/46",
+      "group": "simple",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/lukeed/klona/issues/54",
+      "group": "iterative",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    },
+    {
+      "url": "https://github.com/lukeed/klona/issues/8",
+      "group": "simple",
+      "classification": [],
+      "rounds": 0,
+      "inspected": 0,
+      "patchGenerated": false,
+      "reviewerVerdict": null,
+      "diagnostic": "GITHUB_RATE_LIMITED"
+    }
+  ]
+}

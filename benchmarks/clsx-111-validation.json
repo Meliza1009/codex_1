@@ -1,0 +1,62 @@
+{
+  "url": "https://github.com/lukeed/clsx/issues/111",
+  "testedAt": "2026-09-18T08:25:34.686Z",
+  "classification": [
+    "api_change"
+  ],
+  "status": "completed",
+  "metrics": {
+    "elapsedMs": 464213,
+    "filesIndexed": 18,
+    "filesInspected": 8,
+    "searches": 5,
+    "explorationRounds": 2,
+    "revisions": 1,
+    "filesChanged": 6,
+    "additions": 327,
+    "deletions": 204
+  },
+  "review": {
+    "status": "passed",
+    "verdict": "approved",
+    "requirementsCovered": true,
+    "unrelatedChanges": false,
+    "likelySyntaxProblems": false,
+    "apiBreakageRisk": false,
+    "evidenceSupported": true,
+    "feedback": [
+      "The patch covers root and lite runtimes, CommonJS and ESM declarations, regression cases, and documentation. Tokenization produces individual class names while preserving existing string behavior, input rules, ordering, and duplicates. Supplied evidence supports build compatibility."
+    ],
+    "revisionCount": 1,
+    "checks": [
+      {
+        "label": "Issue requirements covered",
+        "status": "passed"
+      },
+      {
+        "label": "Only relevant files modified",
+        "status": "passed"
+      },
+      {
+        "label": "Existing API appears preserved",
+        "status": "passed"
+      },
+      {
+        "label": "Repository code and tests were not executed",
+        "status": "warning"
+      }
+    ]
+  },
+  "files": [
+    "src/index.js",
+    "src/lite.js",
+    "clsx.d.ts",
+    "clsx.d.mts",
+    "test/index.js",
+    "readme.md"
+  ],
+  "limitations": [
+    "Repository code was not executed.",
+    "Automated tests were not run."
+  ]
+}

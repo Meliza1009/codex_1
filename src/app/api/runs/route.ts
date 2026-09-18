@@ -31,11 +31,13 @@ export async function POST(request: Request) {
     });
     return new Response(stream, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform" } });
   }
+  let disconnected = false;
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const emit = (event: RunEvent) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
-      void streamPilotRun(issueUrl, emit).finally(() => controller.close());
+      const emit = (event: RunEvent) => { if (!disconnected) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); };
+      void streamPilotRun(issueUrl, emit).finally(() => { if (!disconnected) controller.close(); });
     },
+    cancel() { disconnected = true; },
   });
   return new Response(stream, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" } });
 }

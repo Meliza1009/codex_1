@@ -12,6 +12,7 @@
 
 # testing
 /coverage
+/benchmarks/results/
 
 # next.js
 /.next/

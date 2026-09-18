@@ -1,0 +1,20 @@
+{
+  "description": "Public open issue candidates checked 2026-09-18. Difficulty and expected outcome are QA hypotheses, not success guarantees. Always inspect maintainer comments and actual results.",
+  "cases": [
+    { "group": "simple", "url": "https://github.com/lukeed/klona/issues/46", "focus": "Replace __proto__ with Object.getPrototypeOf" },
+    { "group": "simple", "url": "https://github.com/lukeed/klona/issues/8", "focus": "Blob support" },
+    { "group": "simple", "url": "https://github.com/developit/mitt/issues/210", "focus": "Package sideEffects declaration" },
+    { "group": "simple", "url": "https://github.com/google/uuid/issues/193", "focus": "AppendText and AppendBinary API" },
+    { "group": "simple", "url": "https://github.com/lukeed/clsx/issues/52", "focus": "Custom toString objects" },
+    { "group": "medium", "url": "https://github.com/developit/mitt/issues/202", "focus": "Unsubscribe callback" },
+    { "group": "medium", "url": "https://github.com/developit/mitt/issues/136", "focus": "Once API" },
+    { "group": "medium", "url": "https://github.com/lukeed/clsx/issues/111", "focus": "Array-returning API" },
+    { "group": "medium", "url": "https://github.com/lukeed/klona/issues/44", "focus": "Circular reference cloning" },
+    { "group": "medium", "url": "https://github.com/lukeed/klona/issues/43", "focus": "Class initializers across package variants" },
+    { "group": "iterative", "url": "https://github.com/lukeed/clsx/issues/92", "focus": "Lite module resolution and declarations" },
+    { "group": "iterative", "url": "https://github.com/lukeed/clsx/issues/97", "focus": "Published module entry point" },
+    { "group": "iterative", "url": "https://github.com/lukeed/klona/issues/54", "focus": "Spoofed Symbol.toStringTag dispatch" },
+    { "group": "out_of_scope", "url": "https://github.com/lukeed/clsx/issues/112", "focus": "Requires executing cross-browser performance measurements" },
+    { "group": "out_of_scope", "url": "https://github.com/lukeed/klona/issues/39", "focus": "Requires measuring structuredClone performance" }
+  ]
+}
