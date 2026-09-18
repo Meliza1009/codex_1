@@ -862,16 +862,38 @@ function Diff({ run, index, setIndex }: { run: PilotRun; index: number; setIndex
   if (run.status === "refused") {
     return (
       <div className="grid min-h-[440px] place-items-center p-6">
-        <div className="max-w-lg rounded-md border border-[#d29922]/40 bg-[#d29922]/[.07] p-5">
-          <p className="font-mono text-[11px] uppercase tracking-[.14em] text-[#e3b341]">No patch proposed</p>
-          <p className="mt-3 text-sm leading-6 text-white">{run.refusal?.reason || "The available repository evidence was not sufficient for a trustworthy patch."}</p>
-          {run.refusal?.missingEvidence?.map((item, i) => (
-            <p key={`${i}-${item.fact}`} className="mt-2 text-sm text-[#e3b341]">
-              {item.fact}: {item.whyNeeded}
+        <div className="max-w-xl rounded-md border border-[#d29922]/40 bg-[#d29922]/[.07] p-5">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-[#d29922]" />
+            <p className="font-mono text-[11px] uppercase tracking-[.14em] text-[#e3b341]">
+              Safe Refusal — No Patch Proposed
             </p>
-          ))}
-          {run.refusal?.code && <p className="mt-2 font-mono text-xs text-[#8b949e]">{run.refusal.code}</p>}
-          <p className="mt-3 text-sm leading-6 text-[#8b949e]">Suggested next step: {run.refusal?.suggestedNextStep || "Provide the missing repository references or clarify the requested change."}</p>
+          </div>
+          <p className="mt-2 text-xs text-[#8b949e]">
+            Codex Pilot safely stopped because the issue cannot be resolved solely from target repository evidence without speculative assumptions.
+          </p>
+          <div className="mt-4 rounded border border-[#30363d] bg-[#0d1117] p-3 text-sm leading-6 text-white">
+            {run.refusal?.reason || "The available repository evidence was not sufficient for a trustworthy patch."}
+          </div>
+          {run.refusal?.missingEvidence && run.refusal.missingEvidence.length > 0 && (
+            <div className="mt-3 space-y-1.5">
+              <p className="font-mono text-[10px] uppercase tracking-[.1em] text-[#8b949e]">Missing Evidence Details</p>
+              {run.refusal.missingEvidence.map((item, i) => (
+                <div key={`${i}-${item.fact}`} className="rounded bg-[#161b22] px-3 py-2 text-xs">
+                  <span className="font-medium text-[#e3b341]">{item.fact}</span>
+                  <span className="block text-[#8b949e] mt-0.5">{item.whyNeeded}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {run.refusal?.code && (
+            <p className="mt-3 font-mono text-[11px] text-[#8b949e]">
+              Refusal policy code: <span className="text-[#c9d1d9]">{run.refusal.code}</span>
+            </p>
+          )}
+          <p className="mt-3 border-t border-[#30363d] pt-3 text-xs leading-5 text-[#8b949e]">
+            <b className="text-[#c9d1d9]">Suggested next step:</b> {run.refusal?.suggestedNextStep || "Provide the missing repository references or clarify the requested change."}
+          </p>
         </div>
       </div>
     );

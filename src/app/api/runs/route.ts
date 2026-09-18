@@ -32,10 +32,14 @@ export async function POST(request: Request) {
     return new Response(stream, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform" } });
   }
   let disconnected = false;
+  console.log(`[Codex Pilot] Investigating issue: ${issueUrl}`);
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const emit = (event: RunEvent) => { if (!disconnected) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); };
-      void streamPilotRun(issueUrl, emit).finally(() => { if (!disconnected) controller.close(); });
+      void streamPilotRun(issueUrl, emit).finally(() => {
+        console.log(`[Codex Pilot] Finished investigating issue: ${issueUrl}`);
+        if (!disconnected) controller.close();
+      });
     },
     cancel() { disconnected = true; },
   });
