@@ -123,3 +123,176 @@ export function candidateScore(path: string, analysis: IssueAnalysis, related: S
 export function canonicalPath(value: string): string {
   return value.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "");
 }
+
+export function classifyFileRole(path: string): import("./pilot-types").FileRole {
+  const norm = path.toLowerCase().replace(/\\/g, "/");
+  if (/(^|\/)(dist|build|coverage|\.next|out|generated|vendor)(\/|$)/.test(norm) || /\.min\.[cm]?[jt]s$/.test(norm)) {
+    return "generated";
+  }
+  if (/(^|\/)(tests?|__tests__|specs?|fixtures?)(\/|$)/.test(norm) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(norm)) {
+    return "test";
+  }
+  if (/(^|\/)(docs?|documentation)(\/|$)/.test(norm) || /\.(md|mdx|txt|rst)$/.test(norm) || /(^|\/)license/i.test(norm)) {
+    return "docs";
+  }
+  if (
+    /(^|\/)(package\.json|tsconfig.*\.json|\.eslintrc.*|\.prettierrc.*|rollup\.config.*|webpack\.config.*|vite\.config.*|jest\.config.*|\.babelrc.*|turbo\.json)$/.test(norm) ||
+    /\.(ya?ml|toml|ini|env(\..+)?)$/.test(norm)
+  ) {
+    return "config";
+  }
+  return "source";
+}
+
+export function isImplementationIssue(analysis?: IssueAnalysis): boolean {
+  if (!analysis) return true;
+  return analysis.kinds.some((k) => k !== "documentation") || analysis.importantSymbols.length > 0;
+}
+
+export function extractStructuredRequirements(
+  analysis: IssueAnalysis,
+  issueTitle = "",
+  issueBody = ""
+): import("./pilot-types").StructuredRequirement[] {
+  const list: import("./pilot-types").StructuredRequirement[] = [];
+  let reqIndex = 1;
+  const nextId = () => `R${reqIndex++}`;
+
+  const bodyBullets: string[] = [];
+  if (issueBody) {
+    const lines = issueBody.split("\n");
+    let inReqSection = false;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (/^#{1,4}\s*(requirements|acceptance criteria|tasks|specification)/i.test(trimmed)) {
+        inReqSection = true;
+        continue;
+      }
+      if (inReqSection && /^#{1,4}\s+/.test(trimmed)) {
+        inReqSection = false;
+        continue;
+      }
+      if (inReqSection) {
+        const bulletMatch = trimmed.match(/^[-*]\s+(?:\[[ xX]\]\s+)?(.+)$/);
+        if (bulletMatch && bulletMatch[1].length >= 5) {
+          bodyBullets.push(bulletMatch[1].trim());
+        }
+      }
+    }
+  }
+
+  for (const sym of analysis.importantSymbols) {
+    const cleanSym = sym.replace(/\(.*$/, "").trim();
+    if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(cleanSym) && !["require", "import", "export", "default"].includes(cleanSym)) {
+      list.push({
+        id: nextId(),
+        type: "mustImplement",
+        text: `Implement and export '${cleanSym}' utility/API`,
+        status: "unmapped",
+      });
+    }
+  }
+
+  if (bodyBullets.length > 0) {
+    for (const bullet of bodyBullets.slice(0, 8)) {
+      const isTest = /test|spec|assert|coverage/i.test(bullet);
+      const isPreserve = /preserve|backward|compatibility|avoid mutating|without changing|existing/i.test(bullet);
+      const isDocs = /docs?|jsdoc|example|readme/i.test(bullet);
+      const type: import("./pilot-types").RequirementType = isTest ? "mustTest" : isPreserve ? "mustPreserve" : isDocs ? "optionalDocs" : "mustImplement";
+      list.push({
+        id: nextId(),
+        type,
+        text: bullet,
+        status: "unmapped",
+      });
+    }
+  } else {
+    if (analysis.expectedBehavior) {
+      list.push({
+        id: nextId(),
+        type: "mustImplement",
+        text: analysis.expectedBehavior,
+        status: "unmapped",
+      });
+    }
+    for (const approach of (analysis.proposedApproaches || []).slice(0, 3)) {
+      list.push({
+        id: nextId(),
+        type: "mustImplement",
+        text: approach,
+        status: "unmapped",
+      });
+    }
+  }
+
+  for (const constraint of (analysis.constraints || []).slice(0, 3)) {
+    if (!list.some((r) => r.text === constraint)) {
+      list.push({
+        id: nextId(),
+        type: "mustPreserve",
+        text: constraint,
+        status: "unmapped",
+      });
+    }
+  }
+
+  if (!list.some((r) => r.type === "mustPreserve")) {
+    list.push({
+      id: nextId(),
+      type: "mustPreserve",
+      text: "Preserve existing public APIs and backward compatibility",
+      status: "unmapped",
+    });
+  }
+
+  if (!list.some((r) => r.type === "mustTest")) {
+    list.push({
+      id: nextId(),
+      type: "mustTest",
+      text: `Verify that ${analysis.expectedBehavior || "the requested behavior is covered"}`,
+      status: "unmapped",
+    });
+  }
+
+  if (!list.some((r) => r.type === "mustImplement")) {
+    list.unshift({
+      id: "R0",
+      type: "mustImplement",
+      text: analysis.summary || issueTitle || "Implement requested changes",
+      status: "unmapped",
+    });
+  }
+
+  return list.map((req, i) => ({ ...req, id: `R${i + 1}` }));
+}
+
+export function symbolExistsInSource(symbol: string, diff: string, content: string): boolean {
+  const clean = symbol.replace(/\(.*$/, "").trim();
+  if (!clean || !/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(clean)) return true;
+  const addedLines = diff
+    .split("\n")
+    .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+    .join("\n");
+  const regex = new RegExp(`\\b${clean}\\b`);
+  return regex.test(addedLines) || regex.test(content);
+}
+
+export function checkTestImportsAgainstSource(
+  testContent: string,
+  sourceContent: string
+): { valid: boolean; missingSymbol?: string } {
+  const importMatches = testContent.matchAll(/import\s*\{([^}]+)\}\s*from\s*['"](\.[^'"]+)['"]/g);
+  for (const match of importMatches) {
+    const rawSymbols = match[1].split(",");
+    for (const raw of rawSymbols) {
+      const sym = raw.trim().split(/\s+as\s+/)[0].trim();
+      if (!sym || !/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(sym)) continue;
+      const regex = new RegExp(`\\b${sym}\\b`);
+      if (!regex.test(sourceContent)) {
+        return { valid: false, missingSymbol: sym };
+      }
+    }
+  }
+  return { valid: true };
+}
+

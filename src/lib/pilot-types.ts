@@ -35,16 +35,30 @@ export type VerificationReport = {
   error?: string;
 };
 
+export type FileRole = "source" | "test" | "docs" | "config" | "generated";
+
+export type RequirementType = "mustImplement" | "mustPreserve" | "mustTest" | "optionalDocs";
+
+export type StructuredRequirement = {
+  id: string;
+  type: RequirementType;
+  text: string;
+  status: "unmapped" | "planned" | "implemented" | "tested" | "preserved" | "failed";
+  coveredByFiles?: string[];
+  reviewVerdict?: "pass" | "fail";
+  detail?: string;
+};
+
 export type Stage = { id: StageId; label: string; status: "pending" | "active" | "complete" | "skipped" | "failed"; elapsedMs?: number };
 export type Activity = { id: string; stage: StageId; action: string; detail: string; elapsedMs: number; status: "completed" | "warning" };
 export type Search = { id?: string; round?: number; query: string; matches: number; detail: string };
 export type InspectedFile = { path: string; reason: string; finding: string; lines: number };
-export type PlanStep = { id: string; title: string; detail: string; paths?: string[]; status: StepStatus };
-export type FileChange = { path: string; additions: number; deletions: number; diff: string; reason: string };
+export type PlanStep = { id: string; title: string; detail: string; paths?: string[]; status: StepStatus; requirementsCovered?: string[] };
+export type FileChange = { path: string; additions: number; deletions: number; diff: string; reason: string; role?: FileRole; requirementsCovered?: string[] };
 export type FileExplanation = { path: string; explanation: string; coverage: string[] };
 export type EvidenceFile = { path: string; relevance: string; findings: string[]; symbols?: string[]; relationships?: string[] };
 export type EvidenceReport = { decision: "continue" | "ready_to_patch" | "out_of_scope"; enoughEvidence: boolean; confidence: number; reason: string; evidence: EvidenceFile[]; additionalSearches: string[]; repeatSearches: string[]; missingEvidence?: import("./investigation").MissingEvidence[]; requiredCapability?: string };
-export type Review = { status: "passed" | "warning"; verdict?: "approved" | "refused"; requirementsCovered?: boolean; unrelatedChanges?: boolean; likelySyntaxProblems?: boolean; apiBreakageRisk?: boolean; evidenceSupported?: boolean; feedback?: string[]; revisionCount?: number; checks: { label: string; status: "passed" | "warning" }[] };
+export type Review = { status: "passed" | "warning"; verdict?: "approved" | "refused"; requirementsCovered?: boolean; unrelatedChanges?: boolean; likelySyntaxProblems?: boolean; apiBreakageRisk?: boolean; evidenceSupported?: boolean; feedback?: string[]; revisionCount?: number; requirementCoverage?: Record<string, "pass" | "fail">; checks: { label: string; status: "passed" | "warning" }[] };
 export type RunError = { code: string; title: string; message: string; retryable?: boolean };
 
 export type PatchVersion = {
@@ -83,6 +97,7 @@ export type PilotRun = {
   finalPatch?: string;
   patchVersions?: PatchVersion[];
   verification?: VerificationReport;
+  requirements?: StructuredRequirement[];
 };
 
 export type RunEvent =
@@ -92,6 +107,7 @@ export type RunEvent =
   | { type: "search"; search: Search }
   | { type: "inspection"; inspection: InspectedFile }
   | { type: "evidence"; evidence: EvidenceReport }
+  | { type: "requirements"; requirements: StructuredRequirement[] }
   | { type: "plan"; plan: PlanStep[] }
   | { type: "verification"; verification: VerificationReport }
   | { type: "completed"; run: PilotRun }

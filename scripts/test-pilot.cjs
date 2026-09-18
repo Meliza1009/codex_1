@@ -16,7 +16,12 @@ assert.match(proposedDiff('a.ts', 'one', 'two').diff, /No newline at end of file
 
 async function scenario(name, options = {}) {
   let gates = 0, reviews = 0, coderCalls = 0, malformed = 0, plans = 0;
-  const files = { 'src/validator.ts': 'export const validateName = (name: string) => true;\n', ...Object.fromEntries(Array.from({ length: 24 }, (_, i) => [`src/follow${i}.ts`, `export const follow${i} = true;\n`])) };
+  const files = {
+    'src/validator.ts': 'export const validateName = (name: string) => true;\n',
+    'test/validator.test.ts': 'import { validateName } from "../src/validator";\n',
+    'README.md': '# Project\n',
+    ...Object.fromEntries(Array.from({ length: 24 }, (_, i) => [`src/follow${i}.ts`, `export const follow${i} = true;\n`]))
+  };
   const events = [];
   await streamPilotRun('https://github.com/fixture/repo/issues/1', (event) => events.push(structuredClone(event)), {
     github: async (path) => {
@@ -33,18 +38,53 @@ async function scenario(name, options = {}) {
         gates++;
         assert.ok(prompt.includes('priorSearchQueries') && prompt.includes('remainingSearchBudget'));
         const keepGoing = options.budget || gates < (options.rounds || 1);
-        return JSON.stringify({ decision: options.outOfScope ? 'out_of_scope' : keepGoing ? 'continue' : 'ready_to_patch', requiredCapability: options.outOfScope ? 'hardware' : 'none', reason: options.outOfScope ? 'Resolution requires measurements from the reported hardware device.' : keepGoing ? 'A referenced validation rule must be checked.' : 'Validator and requested behavior are established.', missingEvidence: keepGoing ? [{ fact: 'Whether a referenced rule rejects empty names', whyNeeded: 'Needed to avoid contradicting the public validation contract' }] : [], searchQueries: keepGoing ? ['validateName', `follow${gates}`] : [], filesToInspect: keepGoing ? [`src/follow${gates}.ts`] : [], repeatJustifications: [], confidence: .85, evidence: options.cumulative && gates > 1 ? [{ path: 'src/follow1.ts', relevance: 'Referenced rule', findings: ['Exports follow1'] }] : [{ path: 'src/validator.ts', relevance: 'Owns name validation', findings: ['Always returns true'] }] });
+        const evFiles = options.unsolicitedDocs
+          ? [{ path: 'src/validator.ts', relevance: 'Validator', findings: ['Always returns true'] }, { path: 'README.md', relevance: 'Docs', findings: ['Docs'] }]
+          : options.testOnlyPlan || options.testOnlyPatch
+          ? [{ path: 'src/validator.ts', relevance: 'Validator', findings: ['Always returns true'] }, { path: 'test/validator.test.ts', relevance: 'Tests', findings: ['Imports validator'] }]
+          : options.cumulative && gates > 1
+          ? [{ path: 'src/follow1.ts', relevance: 'Referenced rule', findings: ['Exports follow1'] }]
+          : [{ path: 'src/validator.ts', relevance: 'Owns name validation', findings: ['Always returns true'] }];
+        return JSON.stringify({ decision: options.outOfScope ? 'out_of_scope' : keepGoing ? 'continue' : 'ready_to_patch', requiredCapability: options.outOfScope ? 'hardware' : 'none', reason: options.outOfScope ? 'Resolution requires measurements from the reported hardware device.' : keepGoing ? 'A referenced validation rule must be checked.' : 'Validator and requested behavior are established.', missingEvidence: keepGoing ? [{ fact: 'Whether a referenced rule rejects empty names', whyNeeded: 'Needed to avoid contradicting the public validation contract' }] : [], searchQueries: keepGoing ? ['validateName', `follow${gates}`] : [], filesToInspect: keepGoing ? [`src/follow${gates}.ts`] : [], repeatJustifications: [], confidence: .85, evidence: evFiles });
       }
       if (schema.required.includes('goal')) {
         plans++;
         if (options.cumulative) { assert.match(prompt, /Always returns true/); assert.match(prompt, /Referenced rule/); }
         const invalid = options.invalidPlan || (options.repairPlan && plans === 1);
         if (plans === 2 && (options.invalidPlan || options.repairPlan)) assert.match(prompt, /File was not inspected: invented.ts/);
+        if (options.testOnlyPlan) {
+          return JSON.stringify({ goal: 'Test only', filesAllowedToChange: ['test/validator.test.ts'], steps: [{ file: 'test/validator.test.ts', action: 'Write tests', reason: 'Verify' }] });
+        }
         const file = invalid ? 'invented.ts' : options.pathAlias ? './src/validator.ts' : options.plannerBackroute ? 'src/follow20.ts' : options.unsummarized ? 'src/follow0.ts' : 'src/validator.ts';
+        const filesToAllow = options.unsolicitedDocs ? ['src/validator.ts', 'README.md'] : options.testOnlyPatch ? ['src/validator.ts', 'test/validator.test.ts'] : [file];
+        const steps = filesToAllow.map(f => ({ file: f, action: `Modify ${f}`, reason: 'Match requested behavior' }));
         assert.match(prompt, /filesAvailableToChange/);
-        return JSON.stringify({ goal: 'Reject empty names', filesAllowedToChange: [file], steps: [{ file, action: 'Reject empty strings', reason: 'Match requested behavior' }] });
+        return JSON.stringify({ goal: 'Reject empty names', filesAllowedToChange: filesToAllow, steps });
       }
-      if (schema.required.includes('changes')) { coderCalls++; if (coderCalls === 2) { assert.match(prompt, /REVIEWER FEEDBACK/); assert.match(prompt, /PREVIOUS PROPOSED CONTENTS/); } return JSON.stringify({ changes: [{ path: options.badPath ? 'src/secret.ts' : options.plannerBackroute ? 'src/follow20.ts' : options.unsummarized ? 'src/follow0.ts' : 'src/validator.ts', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'Reject empty names' }] }); }
+      if (schema.required.includes('changes')) {
+        coderCalls++;
+        if (coderCalls === 2) {
+          if (options.gateRepair) {
+            assert.match(prompt, /STATIC SANITY GATE FAILED/);
+          } else {
+            assert.match(prompt, /REVIEWER FEEDBACK/);
+          }
+          assert.match(prompt, /PREVIOUS PROPOSED CONTENTS/);
+        }
+        if (options.gateRepair && coderCalls === 1) {
+          return JSON.stringify({ changes: [{ path: 'src/validator.ts', updatedContent: 'export const dummy = 1;\n', explanation: 'Missing validateName' }] });
+        }
+        if (options.missingRequiredSymbol) {
+          return JSON.stringify({ changes: [{ path: 'src/validator.ts', updatedContent: 'export const dummy = 1;\n', explanation: 'Missing validateName' }] });
+        }
+        if (options.testOnlyPatch) {
+          return JSON.stringify({ changes: [{ path: 'test/validator.test.ts', updatedContent: 'it("works", () => {});\n', explanation: 'Tests only' }] });
+        }
+        if (options.unsolicitedDocs) {
+          return JSON.stringify({ changes: [{ path: 'src/validator.ts', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'Validator' }, { path: 'README.md', updatedContent: '# Changed\n', explanation: 'Docs' }] });
+        }
+        return JSON.stringify({ changes: [{ path: options.badPath ? 'src/secret.ts' : options.plannerBackroute ? 'src/follow20.ts' : options.unsummarized ? 'src/follow0.ts' : 'src/validator.ts', updatedContent: 'export const validateName = (name: string) => name.length > 0;\n', explanation: 'Reject empty names' }] });
+      }
       reviews++;
       if (options.firstReviewRefuses) {
         return JSON.stringify({ verdict: 'refuse', requirementsCovered: false, unrelatedChanges: false, likelySyntaxRisk: false, apiBreakageRisk: false, evidenceSupported: true, missingRequirements: ['Empty strings must be rejected'], feedback: ['Direct refusal on first review'] });
@@ -54,8 +94,12 @@ async function scenario(name, options = {}) {
     },
   });
   const terminal = events.at(-1);
-  if (options.invalidPlan) { assert.equal(terminal.error.code, 'PLAN_SCOPE_INVALID'); assert.match(terminal.error.message, /invented.ts/); assert.equal(plans, 2); assert.equal(coderCalls, 0); }
-  else if (options.malformed && !options.recover) { assert.equal(terminal.error.code, 'MALFORMED_AGENT_OUTPUT'); }
+  if (options.testOnlyPlan) {
+    assert.equal(terminal.error.code, 'PLAN_SCOPE_INVALID');
+    assert.match(terminal.error.message, /SOURCE_CHANGE_REQUIRED/);
+  } else if (options.invalidPlan) {
+    assert.equal(terminal.error.code, 'PLAN_SCOPE_INVALID'); assert.match(terminal.error.message, /invented.ts/); assert.equal(plans, 2); assert.equal(coderCalls, 0);
+  } else if (options.malformed && !options.recover) { assert.equal(terminal.error.code, 'MALFORMED_AGENT_OUTPUT'); }
   else {
     assert.equal(terminal.type, 'completed'); const run = terminal.run;
     assert.ok(run.stages.every((stage) => !['pending', 'active'].includes(stage.status)));
@@ -77,15 +121,29 @@ async function scenario(name, options = {}) {
       } else {
         assert.equal(run.patchVersions.length, 1);
       }
+    } else if (options.testOnlyPatch) {
+      assert.equal(run.status, 'refused');
+      assert.equal(run.refusal.code, 'TEST_ONLY_PATCH');
+      assert.ok(run.patchVersions.length >= 1);
+    } else if (options.missingRequiredSymbol) {
+      assert.equal(run.status, 'refused');
+      assert.equal(run.refusal.code, 'API_EXPORT_MISSING');
+      assert.ok(run.patchVersions.length >= 1);
+    } else if (options.unsolicitedDocs) {
+      assert.equal(run.status, 'refused');
+      assert.equal(run.refusal.code, 'PATCH_SCOPE_VIOLATION');
+      assert.ok(run.patchVersions.length >= 1);
     } else {
       assert.equal(run.status, 'completed');
       assert.ok(run.patch.includes('+export'));
       assert.equal(run.metrics.explorationRounds, options.rounds || 1);
       assert.ok(run.originalPatch);
       assert.ok(run.finalPatch);
+      assert.ok(run.requirements && run.requirements.length > 0);
     }
     if (options.budget) { assert.equal(run.refusal.code, 'BUDGET_EXHAUSTED'); assert.doesNotMatch(run.refusal.suggestedNextStep, /runtime/); }
     if (options.revise || options.reviewFails) { assert.equal(reviews, 2); assert.equal(coderCalls, 2); }
+    if (options.gateRepair) { assert.equal(coderCalls, 2); assert.equal(reviews, 1); }
     if (options.firstReviewRefuses) { assert.equal(reviews, 1); assert.equal(coderCalls, 1); }
     if (options.outOfScope) assert.equal(run.refusal.code, 'OUT_OF_SCOPE_HARDWARE');
     if (options.plannerBackroute) {
@@ -113,4 +171,9 @@ async function scenario(name, options = {}) {
   await scenario('invalid plan repaired using exact validation feedback', { repairPlan: true });
   await scenario('invented plan paths fail with specific diagnostics', { invalidPlan: true });
   await scenario('planner back-routes to exploration for uninspected manifest file', { plannerBackroute: true });
-})().catch((error) => { console.error(error); process.exitCode = 1; });
+  await scenario('plan without source files rejected for implementation issue', { testOnlyPlan: true });
+  await scenario('tests-only patch rejected for implementation issue by static gate', { testOnlyPatch: true });
+  await scenario('missing required symbol rejected by pre-review static gate', { missingRequiredSymbol: true });
+  await scenario('unsolicited docs change rejected by pre-review static gate', { unsolicitedDocs: true });
+  await scenario('pre-review static gate triggers repair loop and recovers', { gateRepair: true });
+})();

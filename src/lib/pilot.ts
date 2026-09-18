@@ -1,11 +1,45 @@
 import "server-only";
-import { analysisSchema, canonicalPath, proposedDiff, conforms, normalizeQuery, candidateScore, relatedPaths, repositoryStructure, type IssueAnalysis, type MissingEvidence } from "./investigation";
+import {
+  analysisSchema,
+  canonicalPath,
+  proposedDiff,
+  conforms,
+  normalizeQuery,
+  candidateScore,
+  relatedPaths,
+  repositoryStructure,
+  classifyFileRole,
+  isImplementationIssue,
+  extractStructuredRequirements,
+  symbolExistsInSource,
+  checkTestImportsAgainstSource,
+  type IssueAnalysis,
+  type MissingEvidence,
+} from "./investigation";
 
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Activity, EvidenceFile, EvidenceReport, FileChange, FileExplanation, InspectedFile, PatchVersion, PilotRun, PlanStep, Review, RunError, RunEvent, Search, Stage, StageId } from "@/lib/pilot-types";
+import type {
+  Activity,
+  EvidenceFile,
+  EvidenceReport,
+  FileChange,
+  FileExplanation,
+  FileRole,
+  InspectedFile,
+  PatchVersion,
+  PilotRun,
+  PlanStep,
+  Review,
+  RunError,
+  RunEvent,
+  Search,
+  Stage,
+  StageId,
+  StructuredRequirement,
+} from "@/lib/pilot-types";
 
 type GithubIssue = { number: number; title: string; body: string | null; comments: number; html_url: string; state: "open" | "closed"; pull_request?: unknown };
 type GithubRepo = { default_branch: string; size: number; archived: boolean; disabled: boolean; html_url: string; private: boolean };
@@ -14,9 +48,9 @@ type RankedPath = { path: string; matches: string[]; score: number };
 type SearchItem = { path: string };
 type SearchResponse = { items?: SearchItem[] };
 type ExplorerResponse = { missingEvidence: MissingEvidence[]; requiredCapability: "none" | "runtime" | "credentials" | "hardware" | "external_services" | "private_infrastructure"; decision?: "continue" | "ready_to_patch" | "out_of_scope"; confidence?: number; reason?: string; searchQueries?: string[]; filesToInspect?: string[]; repeatJustifications?: { target?: string; reason?: string }[]; evidence?: { path?: string; relevance?: string; findings?: string[] }[] };
-type PlannerResponse = { goal: string; steps: { file: string; action: string; reason: string }[]; filesAllowedToChange: string[] };
-type CoderResponse = { changes: { path: string; updatedContent: string; explanation: string }[] };
-type ReviewerResponse = { requirementsCovered?: boolean; unrelatedChanges?: boolean; likelySyntaxRisk?: boolean; missingRequirements: string[]; apiBreakageRisk?: boolean; evidenceSupported?: boolean; verdict?: "approve" | "revise" | "refuse"; feedback?: string[] };
+type PlannerResponse = { goal: string; steps: { file: string; action: string; reason: string; requirementsCovered?: string[] }[]; filesAllowedToChange: string[] };
+type CoderResponse = { changes: { path: string; updatedContent: string; explanation: string; role?: FileRole; requirementsCovered?: string[] }[] };
+type ReviewerResponse = { requirementsCovered?: boolean; unrelatedChanges?: boolean; likelySyntaxRisk?: boolean; missingRequirements: string[]; apiBreakageRisk?: boolean; evidenceSupported?: boolean; verdict?: "approve" | "revise" | "refuse"; feedback?: string[]; requirementCoverage?: Record<string, "pass" | "fail"> };
 type GithubClient = <T>(path: string, raw?: boolean) => Promise<T>;
 type CodexRunner = (prompt: string, schema?: object) => Promise<string>;
 
@@ -28,6 +62,7 @@ type AgentRunState = {
   issueData?: GithubIssue;
   comments: { body: string; author_association?: string }[];
   analysis?: IssueAnalysis;
+  requirements: StructuredRequirement[];
   structure?: ReturnType<typeof repositoryStructure>;
   requestedFiles: string[];
   manifest: RankedPath[];
@@ -110,11 +145,11 @@ function inspectedContents(state: AgentRunState) { return [...state.originals].m
 const explorerSchema = { type: "object", additionalProperties: false, required: ["missingEvidence", "requiredCapability", "decision", "searchQueries", "filesToInspect", "repeatJustifications", "reason", "confidence", "evidence"], properties: { missingEvidence: { type: "array", maxItems: 6, items: { type: "object", additionalProperties: false, required: ["fact", "whyNeeded"], properties: { fact: { type: "string", minLength: 10 }, whyNeeded: { type: "string", minLength: 10 } } } }, requiredCapability: { type: "string", enum: ["none", "runtime", "credentials", "hardware", "external_services", "private_infrastructure"] }, decision: { type: "string", enum: ["continue", "ready_to_patch", "out_of_scope"] }, searchQueries: { type: "array", maxItems: MAX_SEARCHES_PER_ROUND, items: { type: "string", maxLength: 80 } }, filesToInspect: { type: "array", maxItems: MAX_FILES_PER_ROUND, items: { type: "string" } }, repeatJustifications: { type: "array", maxItems: MAX_SEARCHES_PER_ROUND, items: { type: "object", additionalProperties: false, required: ["target", "reason"], properties: { target: { type: "string" }, reason: { type: "string", minLength: 8 } } } }, confidence: { type: "number", minimum: 0, maximum: 1 }, reason: { type: "string" }, evidence: { type: "array", maxItems: MAX_FILES_INSPECTED, items: { type: "object", additionalProperties: false, required: ["path", "relevance", "findings"], properties: { path: { type: "string" }, relevance: { type: "string" }, findings: { type: "array", maxItems: 4, items: { type: "string" } } } } } } } as const;
 const plannerSchema = { type: "object", additionalProperties: false, required: ["goal", "steps", "filesAllowedToChange"], properties: {
   goal: { type: "string", minLength: 1 }, filesAllowedToChange: { type: "array", minItems: 1, maxItems: MAX_CHANGED_FILES, items: { type: "string" } },
-  steps: { type: "array", minItems: 1, maxItems: 8, items: { type: "object", additionalProperties: false, required: ["file", "action", "reason"], properties: { file: { type: "string" }, action: { type: "string", minLength: 1 }, reason: { type: "string", minLength: 1 } } } }
+  steps: { type: "array", minItems: 1, maxItems: 8, items: { type: "object", additionalProperties: false, required: ["file", "action", "reason"], properties: { file: { type: "string" }, action: { type: "string", minLength: 1 }, reason: { type: "string", minLength: 1 }, requirementsCovered: { type: "array", items: { type: "string" } } } } }
 } };
-const coderSchema = { type: "object", additionalProperties: false, required: ["changes"], properties: { changes: { type: "array", minItems: 1, maxItems: MAX_CHANGED_FILES, items: { type: "object", additionalProperties: false, required: ["path", "updatedContent", "explanation"], properties: { path: { type: "string" }, updatedContent: { type: "string", maxLength: MAX_FILE_BYTES }, explanation: { type: "string", minLength: 1 } } } } } };
+const coderSchema = { type: "object", additionalProperties: false, required: ["changes"], properties: { changes: { type: "array", minItems: 1, maxItems: MAX_CHANGED_FILES, items: { type: "object", additionalProperties: false, required: ["path", "updatedContent", "explanation"], properties: { path: { type: "string" }, updatedContent: { type: "string", maxLength: MAX_FILE_BYTES }, explanation: { type: "string", minLength: 1 }, role: { type: "string", enum: ["source", "test", "docs", "config", "generated"] }, requirementsCovered: { type: "array", items: { type: "string" } } } } } } };
 
-const reviewSchema = { type: "object", additionalProperties: false, required: ["missingRequirements", "requirementsCovered", "unrelatedChanges", "likelySyntaxRisk", "apiBreakageRisk", "evidenceSupported", "verdict", "feedback"], properties: { missingRequirements: { type: "array", maxItems: 8, items: { type: "string" } }, requirementsCovered: { type: "boolean" }, unrelatedChanges: { type: "boolean" }, likelySyntaxRisk: { type: "boolean" }, apiBreakageRisk: { type: "boolean" }, evidenceSupported: { type: "boolean" }, verdict: { type: "string", enum: ["approve", "revise", "refuse"] }, feedback: { type: "array", maxItems: 4, items: { type: "string" } } } } as const;
+const reviewSchema = { type: "object", additionalProperties: false, required: ["missingRequirements", "requirementsCovered", "unrelatedChanges", "likelySyntaxRisk", "apiBreakageRisk", "evidenceSupported", "verdict", "feedback"], properties: { missingRequirements: { type: "array", maxItems: 8, items: { type: "string" } }, requirementsCovered: { type: "boolean" }, unrelatedChanges: { type: "boolean" }, likelySyntaxRisk: { type: "boolean" }, apiBreakageRisk: { type: "boolean" }, evidenceSupported: { type: "boolean" }, verdict: { type: "string", enum: ["approve", "revise", "refuse"] }, feedback: { type: "array", maxItems: 4, items: { type: "string" } }, requirementCoverage: { type: "object", additionalProperties: { type: "string" } } } } as const;
 
 async function runCodex(prompt: string, schema?: object) {
   const folder = await mkdtemp(join(tmpdir(), "codex-pilot-")); const output = join(folder, "answer.json"); const schemaPath = join(folder, "response-schema.json");
@@ -136,7 +171,7 @@ async function responseJson<T>(runner: CodexRunner, instructions: string, input:
   return fail("MALFORMED_AGENT_OUTPUT", "Invalid agent response", "The agent returned invalid structured output twice. No patch was published.", true);
 }
 
-function createState(): AgentRunState { return { comments: [], manifest: [], requestedFiles: [], contentCache: new Map(), originals: new Map(), proposedContents: new Map(), searches: [], inspectedFiles: [], plan: [], files: [], explanations: [], limitations: [], stages: (Object.keys(stageLabels) as StageId[]).map((id) => ({ id, label: stageLabels[id], status: "pending" })), activity: [], filesIndexed: 0, explorationRounds: 0, revisionCount: 0, summary: "", patchVersions: [] }; }
+function createState(): AgentRunState { return { comments: [], manifest: [], requestedFiles: [], contentCache: new Map(), originals: new Map(), proposedContents: new Map(), searches: [], inspectedFiles: [], plan: [], files: [], explanations: [], limitations: [], stages: (Object.keys(stageLabels) as StageId[]).map((id) => ({ id, label: stageLabels[id], status: "pending" })), activity: [], filesIndexed: 0, explorationRounds: 0, revisionCount: 0, summary: "", patchVersions: [], requirements: [] }; }
 function emitters(state: AgentRunState, emit: (event: RunEvent) => void, started: number) {
   const elapsed = () => Date.now() - started;
   const stage = (id: StageId, status: Stage["status"] | "investigating" | "completed" | "warning") => { const item = state.stages.find((candidate) => candidate.id === id)!; item.status = status === "investigating" ? "active" : status === "completed" ? "complete" : status === "warning" ? "failed" : status; if (status !== "pending") item.elapsedMs = elapsed(); emit({ type: "stage", stage: { ...item } }); };
@@ -184,14 +219,24 @@ function fallbackQueries(state: AgentRunState) {
     .filter((query) => !prior.has(normalizedTarget(query))));
 }
 
-function buildFiles(proposal: CoderResponse, originals: Map<string, string>, approvedPaths: Set<string>) {
+function buildFiles(proposal: CoderResponse, originals: Map<string, string>, approvedPaths: Set<string>, requirements: StructuredRequirement[] = []) {
   const edits = proposal.changes.map((edit) => ({ ...edit, path: canonicalPath(edit.path) }));
   if (!edits.length || edits.length > MAX_CHANGED_FILES || new Set(edits.map((edit) => edit.path)).size !== edits.length) return { reason: "The coder returned no changes or duplicated file paths." };
   const files: FileChange[] = [];
   for (const edit of edits) {
     if (!approvedPaths.has(edit.path) || !originals.has(edit.path) || Buffer.byteLength(edit.updatedContent, "utf8") > MAX_FILE_BYTES) return { reason: "The coder proposed unchanged content or an edit outside the approved inspected-file scope." };
     if (edit.updatedContent === originals.get(edit.path)) continue;
-    files.push({ path: edit.path, ...proposedDiff(edit.path, originals.get(edit.path)!, edit.updatedContent), reason: edit.explanation });
+    const role = edit.role || classifyFileRole(edit.path);
+    const covered = edit.requirementsCovered && edit.requirementsCovered.length > 0
+      ? edit.requirementsCovered
+      : requirements.filter((r) => (r.type === "mustImplement" && role === "source") || (r.type === "mustTest" && role === "test") || r.type === "mustPreserve").map((r) => r.id);
+    files.push({
+      path: edit.path,
+      ...proposedDiff(edit.path, originals.get(edit.path)!, edit.updatedContent),
+      reason: edit.explanation,
+      role,
+      requirementsCovered: covered,
+    });
   }
   return files.length ? { files } : { reason: "The coder returned no source changes." };
 }
@@ -281,15 +326,21 @@ async function createPlan(state: AgentRunState, encoded: string, client: GithubC
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const input = {
-      issueAnalysis: state.analysis, evidence: state.evidence?.evidence,
+      issueAnalysis: state.analysis,
+      requirements: state.requirements.map((r) => ({ id: r.id, type: r.type, text: r.text })),
+      evidence: state.evidence?.evidence,
       // Exact inspected content is evidence even if the gate's compact summary omitted this file.
-      inspectedFiles: state.inspectedFiles, contents: Object.fromEntries(state.originals),
+      inspectedFiles: state.inspectedFiles,
+      contents: Object.fromEntries(state.originals),
       filesAvailableToChange: [...state.originals.keys()],
     };
 
-    const result = await responseJson<PlannerResponse>(codex,
-      "You are the implementation planner for Codex Pilot. The evidence gate has determined that evidence is ready_to_patch. Ground your plan in the validated findings and exact inspected contents. Each step needs file, action and reason. Use exact repository-relative paths from filesAvailableToChange. filesAllowedToChange must contain all and only step files. Only block if there is a concrete contradiction between the issue requirements and repository facts. Reading tests is allowed and proposed test source changes are allowed; never propose executing tests or the repository. Correct validationErrors if provided.",
-      JSON.stringify({ ...input, previousPlan, validationErrors: errors }), plannerSchema);
+    const result = await responseJson<PlannerResponse>(
+      codex,
+      "You are the implementation planner for Codex Pilot. The evidence gate has determined that evidence is ready_to_patch. Ground your plan in the validated findings, exact inspected contents, and requirements contract. Each step needs file, action, and reason, and may specify requirementsCovered (e.g. ['R1']). Use exact repository-relative paths from filesAvailableToChange. filesAllowedToChange must contain all and only step files. For implementation issues, at least one step must modify a production/source code file (not just tests or docs). Only block if there is a concrete contradiction between the issue requirements and repository facts. Reading tests is allowed and proposed test source changes are allowed; never propose executing tests or the repository. Correct validationErrors if provided.",
+      JSON.stringify({ ...input, previousPlan, validationErrors: errors }),
+      plannerSchema
+    );
     const steps = result.steps.map((step) => ({ ...step, file: canonicalPath(step.file) }));
     const allowed = new Set(result.filesAllowedToChange.map(canonicalPath));
     const stepPaths = new Set(steps.map((step) => step.file));
@@ -298,6 +349,12 @@ async function createPlan(state: AgentRunState, encoded: string, client: GithubC
       ...[...stepPaths].filter((path) => !allowed.has(path)).map((path) => `Step file missing from filesAllowedToChange: ${path}`),
       ...[...allowed].filter((path) => !stepPaths.has(path)).map((path) => `Allowed file has no plan step: ${path}`),
     ];
+
+    const hasSourceStep = steps.some((step) => classifyFileRole(step.file) === "source");
+    if (isImplementationIssue(state.analysis) && !hasSourceStep) {
+      errors.push("SOURCE_CHANGE_REQUIRED: Implementation issue requires at least one production source file modification, but the plan only targets test/doc/config files.");
+    }
+
     if (errors.length) {
       // If planner referenced repository files that were not yet inspected, back-route to targeted exploration once
       const missingRepoFiles = [...new Set([...allowed, ...stepPaths])].filter((path) => !state.originals.has(path) && state.manifest.some((file) => file.path === path));
@@ -319,10 +376,48 @@ async function createPlan(state: AgentRunState, encoded: string, client: GithubC
       tools.activity("planning", attempt === 0 ? "Repairing plan mapping" : "Plan mapping failed", errors.join("; "), "warning");
       continue;
     }
-    state.plan = steps.map((step, index) => ({ id: String(index + 1), title: step.action, detail: step.reason, paths: [step.file], status: "pending" }));
-    state.summary = result.goal; emit({ type: "plan", plan: state.plan });
+
+    // Map requirements to steps
+    const mappedReqIds = new Set<string>();
+    for (const step of steps) {
+      const covered = new Set(step.requirementsCovered || []);
+      for (const req of state.requirements) {
+        if (covered.has(req.id)) {
+          mappedReqIds.add(req.id);
+          continue;
+        }
+        const fileRole = classifyFileRole(step.file);
+        const textLower = (step.action + " " + step.reason + " " + step.file).toLowerCase();
+        const reqWords = req.text.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+        const matchesWord = reqWords.some((w) => textLower.includes(w));
+        if (matchesWord || (req.type === "mustImplement" && fileRole === "source") || (req.type === "mustTest" && fileRole === "test")) {
+          covered.add(req.id);
+          mappedReqIds.add(req.id);
+        }
+      }
+      step.requirementsCovered = [...covered];
+    }
+
+    for (const req of state.requirements) {
+      if (mappedReqIds.has(req.id)) {
+        req.status = "planned";
+      }
+    }
+    emit({ type: "requirements", requirements: state.requirements });
+
+    state.plan = steps.map((step, index) => ({
+      id: String(index + 1),
+      title: step.action,
+      detail: step.reason,
+      paths: [step.file],
+      status: "pending",
+      requirementsCovered: step.requirementsCovered,
+    }));
+    state.summary = result.goal;
+    emit({ type: "plan", plan: state.plan });
     tools.activity("planning", "Created implementation plan", `${state.plan.length} steps mapped to ${allowed.size} inspected files.`);
-    tools.stage("planning", "completed"); return;
+    tools.stage("planning", "completed");
+    return;
   }
   fail("PLAN_SCOPE_INVALID", "Planning stopped", errors.join("; "), true);
 }
@@ -335,14 +430,41 @@ async function generatePatch(state: AgentRunState, codex: CodexRunner, tools: Re
   const approved = new Set(state.plan.flatMap((step) => step.paths ?? []));
   const originalContents = [...state.originals].filter(([path]) => approved.has(path)).map(([path, content]) => `--- ${path}\n${content}`).join("\n\n");
   const coderInstructions = feedback
-    ? "You are the coder for Codex Pilot revising a proposed patch based on reviewer feedback. Return changes with path, updatedContent and explanation containing minimal updated full-file contents ONLY for the approved files provided. Strictly modify only the files approved in the plan. Do not touch documentation (such as README.md, docs, or changelogs) or unrelated files unless the issue explicitly demands documentation changes. Address reviewer feedback directly while preserving all already-correct changes. Preserve existing public APIs and backward compatibility unless the issue requires a change. Do not create files, run code, or claim tests."
-    : "You are the coder for Codex Pilot. Return changes with path, updatedContent and explanation containing minimal updated full-file contents ONLY for the approved files provided. Strictly modify only the files approved in the plan. Do not touch documentation (e.g. README.md) or unrelated files unless the issue explicitly requires documentation changes. Preserve existing public APIs unless the issue requires a change. Do not create files, run code, or claim tests. Do not fabricate missing repository knowledge.";
-  const proposal = await responseJson<CoderResponse>(codex, coderInstructions, `${compactIssue(state)}\n\nEVIDENCE PACKAGE\n${evidenceSummary(state.evidence)}\n\nPLAN\n${state.plan.map((step) => `${step.title}: ${step.detail}\nPaths: ${step.paths?.join(", ")}`).join("\n\n")}\n\nAPPROVED ORIGINAL FILES\n${originalContents}${feedback ? `\n\nPREVIOUS PROPOSED CONTENTS\n${JSON.stringify(Object.fromEntries(state.proposedContents))}\n\nREVIEWER FEEDBACK\n${feedback}\nReturn the complete revised change set, retaining correct prior changes.` : ""}`, coderSchema);
-  const built = buildFiles(proposal, state.originals, approved);
+    ? "You are the coder for Codex Pilot revising a proposed patch based on reviewer feedback or static gate check failure. Return changes with path, updatedContent, explanation, role ('source' | 'test' | 'docs' | 'config' | 'generated'), and requirementsCovered containing minimal updated full-file contents ONLY for the approved files provided. Strictly modify only the files approved in the plan. Do not touch documentation (such as README.md, docs, or changelogs) or unrelated files unless the issue explicitly demands documentation changes. Address reviewer/gate feedback directly while preserving all already-correct changes. Preserve existing public APIs and backward compatibility unless the issue requires a change. Do not create files, run code, or claim tests."
+    : "You are the coder for Codex Pilot. Return changes with path, updatedContent, explanation, role ('source' | 'test' | 'docs' | 'config' | 'generated'), and requirementsCovered containing minimal updated full-file contents ONLY for the approved files provided. Strictly modify only the files approved in the plan. Do not touch documentation (e.g. README.md) or unrelated files unless the issue explicitly requires documentation changes. Preserve existing public APIs unless the issue requires a change. Do not create files, run code, or claim tests. Do not fabricate missing repository knowledge.";
+
+  const reqChecklist = state.requirements.map((r) => ({ id: r.id, type: r.type, text: r.text, status: r.status }));
+
+  const proposal = await responseJson<CoderResponse>(
+    codex,
+    coderInstructions,
+    `${compactIssue(state)}\n\nREQUIREMENTS CONTRACT\n${JSON.stringify(reqChecklist, null, 2)}\n\nEVIDENCE PACKAGE\n${evidenceSummary(state.evidence)}\n\nPLAN\n${state.plan.map((step) => `${step.title}: ${step.detail}\nPaths: ${step.paths?.join(", ")}${step.requirementsCovered?.length ? `\nRequirements: ${step.requirementsCovered.join(", ")}` : ""}`).join("\n\n")}\n\nAPPROVED ORIGINAL FILES\n${originalContents}${feedback ? `\n\nPREVIOUS PROPOSED CONTENTS\n${JSON.stringify(Object.fromEntries(state.proposedContents))}\n\nREVIEWER FEEDBACK\n${feedback}\nReturn the complete revised change set, retaining correct prior changes.` : ""}`,
+    coderSchema
+  );
+  const built = buildFiles(proposal, state.originals, approved, state.requirements);
   if (!("files" in built) || !built.files) return { ok: false, reason: built.reason || "The coder could not produce a safe patch." };
   state.files = built.files;
   state.proposedContents = new Map(proposal.changes.map((edit) => [canonicalPath(edit.path), edit.updatedContent]));
   state.explanations = state.files.map((file) => ({ path: file.path, explanation: file.reason, coverage: ["Proposed change reviewed against the issue requirements"] }));
+
+  // Update requirement status based on generated files
+  for (const file of state.files) {
+    const role = file.role || classifyFileRole(file.path);
+    for (const reqId of file.requirementsCovered || []) {
+      const req = state.requirements.find((r) => r.id === reqId);
+      if (req) {
+        if (!req.coveredByFiles) req.coveredByFiles = [];
+        if (!req.coveredByFiles.includes(file.path)) req.coveredByFiles.push(file.path);
+        if (role === "source" && req.type === "mustImplement") {
+          req.status = "implemented";
+        } else if (role === "test" && req.type === "mustTest") {
+          req.status = "tested";
+        }
+      }
+    }
+  }
+  emit({ type: "requirements", requirements: state.requirements });
+
   state.files.forEach((file) => tools.activity(stageId, `Modified ${file.path}`, `Proposed edit (+${file.additions} -${file.deletions}).`));
   tools.activity(stageId, feedback ? "Generated revised diff" : "Generated unified diff", `Built a reviewable patch from ${state.files.length} approved source file${state.files.length === 1 ? "" : "s"}.`);
   state.plan.forEach((step) => { step.status = "completed"; });
@@ -375,28 +497,158 @@ async function generatePatch(state: AgentRunState, codex: CodexRunner, tools: Re
   return { ok: true };
 }
 
-async function reviewPatch(state: AgentRunState, codex: CodexRunner, tools: ReturnType<typeof emitters>) {
+type StaticCheckResult =
+  | { ok: true }
+  | { ok: false; code: "TEST_ONLY_PATCH" | "API_EXPORT_MISSING" | "PATCH_SCOPE_VIOLATION" | "CODER_MISSING_IMPLEMENTATION"; reason: string };
+
+function validatePatchStatic(files: FileChange[], state: AgentRunState): StaticCheckResult {
+  const isImpl = isImplementationIssue(state.analysis);
+  const sourceChanges = files.filter((f) => (f.role || classifyFileRole(f.path)) === "source");
+
+  // 1. Implementation issue must modify at least one production source file
+  if (isImpl && sourceChanges.length === 0) {
+    return {
+      ok: false,
+      code: "TEST_ONLY_PATCH",
+      reason: "TEST_ONLY_PATCH: This issue requires modifying production/source code, but the patch only modified test, documentation, or configuration files.",
+    };
+  }
+
+  // 2. Reject unsolicited documentation modifications
+  const docsChanges = files.filter((f) => (f.role || classifyFileRole(f.path)) === "docs");
+  const issueMentionsDocs =
+    state.requirements.some((r) => r.type === "optionalDocs" || /docs?|readme|changelog/i.test(r.text)) ||
+    /docs?|readme/i.test(state.issueData?.title || "") ||
+    /docs?|readme/i.test(state.analysis?.summary || "");
+  if (docsChanges.length > 0 && !issueMentionsDocs) {
+    return {
+      ok: false,
+      code: "PATCH_SCOPE_VIOLATION",
+      reason: `PATCH_SCOPE_VIOLATION: Unsolicited documentation changes detected (${docsChanges.map((d) => d.path).join(", ")}). Documentation should not be modified unless explicitly required by the issue.`,
+    };
+  }
+
+  // 3. Required exports / symbols existence check
+  if (isImpl && state.analysis?.importantSymbols?.length) {
+    for (const sym of state.analysis.importantSymbols) {
+      const cleanSym = sym.replace(/\(.*$/, "").trim();
+      if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(cleanSym) && !["require", "import", "export", "default"].includes(cleanSym)) {
+        let found = false;
+        for (const sf of sourceChanges) {
+          const updatedContent = state.proposedContents.get(sf.path) || "";
+          if (symbolExistsInSource(cleanSym, sf.diff, updatedContent)) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          return {
+            ok: false,
+            code: "API_EXPORT_MISSING",
+            reason: `API_EXPORT_MISSING: Required symbol '${cleanSym}' is missing from the modified production source files.`,
+          };
+        }
+      }
+    }
+  }
+
+  // 4. Test-to-implementation consistency check
+  const testChanges = files.filter((f) => (f.role || classifyFileRole(f.path)) === "test");
+  if (sourceChanges.length > 0 && testChanges.length > 0) {
+    const allSourceContent = sourceChanges.map((sf) => state.proposedContents.get(sf.path) || "").join("\n");
+    for (const tf of testChanges) {
+      const testContent = state.proposedContents.get(tf.path) || "";
+      const check = checkTestImportsAgainstSource(testContent, allSourceContent);
+      if (!check.valid && check.missingSymbol) {
+        return {
+          ok: false,
+          code: "API_EXPORT_MISSING",
+          reason: `API_EXPORT_MISSING: Test file '${tf.path}' imports '${check.missingSymbol}', but that symbol is not declared or exported in the source file.`,
+        };
+      }
+    }
+  }
+
+  // 5. MustImplement requirements coverage check
+  if (isImpl) {
+    for (const req of state.requirements.filter((r) => r.type === "mustImplement")) {
+      const covered = files.some((f) => {
+        const role = f.role || classifyFileRole(f.path);
+        return role === "source" && (!f.requirementsCovered || f.requirementsCovered.length === 0 || f.requirementsCovered.includes(req.id));
+      });
+      if (!covered) {
+        return {
+          ok: false,
+          code: "CODER_MISSING_IMPLEMENTATION",
+          reason: `CODER_MISSING_IMPLEMENTATION: Requirement '${req.id}: ${req.text}' has no corresponding production source code change.`,
+        };
+      }
+    }
+  }
+
+  return { ok: true };
+}
+
+async function reviewPatch(state: AgentRunState, codex: CodexRunner, tools: ReturnType<typeof emitters>, emit: (event: RunEvent) => void) {
   tools.stage("reviewing", "investigating");
-  const result = await responseJson<ReviewerResponse>(codex, "You are the patch reviewer for Codex Pilot. Judge only the supplied issue, evidence package, plan, original changed files, and generated patch. Approve only if all requirements appear covered, no unrelated changes are present, syntax/API risk appears low, and evidence supports the patch. Return revise for one specific fixable concern, otherwise refuse. Include missingRequirements explicitly. Never claim execution or tests.", `${compactIssue(state)}\n\nEVIDENCE PACKAGE\n${evidenceSummary(state.evidence)}\n\nPLAN\n${state.plan.map((step) => `${step.title}: ${step.detail}`).join("\n")}\n\nORIGINAL CHANGED FILES\n${[...state.originals].filter(([path]) => state.files.some((file) => file.path === path)).map(([path, content]) => `--- ${path}\n${content}`).join("\n\n")}\n\nPATCH\n${state.files.map((file) => file.diff).join("\n")}`, reviewSchema);
+  const instructions =
+    "You are the patch reviewer for Codex Pilot. Judge only the supplied issue, requirements contract, evidence package, plan, original changed files, and generated patch. Verify each requirement individually. Return requirementCoverage mapping each requirement ID to 'pass' or 'fail - explanation'. Approve only if all requirements pass, no unrelated changes are present, syntax/API risk appears low, and evidence supports the patch. Return revise for one specific fixable concern, otherwise refuse. Include missingRequirements explicitly. Never claim execution or tests.";
+
+  const input = `${compactIssue(state)}\n\nREQUIREMENTS CONTRACT\n${state.requirements.map((r) => `[${r.id}] (${r.type}) ${r.text}`).join("\n")}\n\nEVIDENCE PACKAGE\n${evidenceSummary(state.evidence)}\n\nPLAN\n${state.plan.map((step) => `${step.title}: ${step.detail}`).join("\n")}\n\nORIGINAL CHANGED FILES\n${[...state.originals].filter(([path]) => state.files.some((file) => file.path === path)).map(([path, content]) => `--- ${path}\n${content}`).join("\n\n")}\n\nPATCH\n${state.files.map((file) => file.diff).join("\n")}`;
+
+  const result = await responseJson<ReviewerResponse>(codex, instructions, input, reviewSchema);
+
+  const cov = result.requirementCoverage || {};
+  let anyReqFailed = false;
+  for (const req of state.requirements) {
+    const verdict = cov[req.id];
+    if (verdict) {
+      const isPass = typeof verdict === "string" && verdict.toLowerCase().startsWith("pass");
+      req.reviewVerdict = isPass ? "pass" : "fail";
+      if (!isPass) {
+        anyReqFailed = true;
+        req.status = "failed";
+        req.detail = verdict;
+      } else {
+        if (req.type === "mustPreserve") req.status = "preserved";
+        else if (req.type === "mustTest") req.status = "tested";
+        else if (req.type === "mustImplement") req.status = "implemented";
+      }
+    } else {
+      if (result.requirementsCovered === false && req.type === "mustImplement") {
+        req.status = "failed";
+        anyReqFailed = true;
+      } else if (result.requirementsCovered === true) {
+        if (req.type === "mustPreserve") req.status = "preserved";
+        else if (req.type === "mustTest") req.status = "tested";
+        else if (req.type === "mustImplement") req.status = "implemented";
+        req.reviewVerdict = "pass";
+      }
+    }
+  }
+  emit({ type: "requirements", requirements: state.requirements });
+
   const feedback = [...result.missingRequirements, ...(result.feedback ?? [])].filter(Boolean).slice(0, 4);
-  const safe = result.missingRequirements.length === 0 && result.requirementsCovered === true && result.unrelatedChanges === false && result.likelySyntaxRisk === false && result.apiBreakageRisk === false && result.evidenceSupported === true;
+  const safe = !anyReqFailed && result.missingRequirements.length === 0 && result.requirementsCovered === true && result.unrelatedChanges === false && result.likelySyntaxRisk === false && result.apiBreakageRisk === false && result.evidenceSupported === true;
   const verdict = result.verdict === "approve" && safe ? "approve" : result.verdict === "revise" && state.revisionCount < MAX_REVISION_ROUNDS ? "revise" : "refuse";
+
   state.review = {
     status: verdict === "approve" ? "passed" : "warning",
     verdict: verdict === "approve" ? "approved" : "refused",
-    requirementsCovered: result.requirementsCovered === true,
+    requirementsCovered: result.requirementsCovered === true && !anyReqFailed,
     unrelatedChanges: result.unrelatedChanges === true,
     likelySyntaxProblems: result.likelySyntaxRisk === true,
     apiBreakageRisk: result.apiBreakageRisk === true,
     evidenceSupported: result.evidenceSupported === true,
     feedback,
     revisionCount: state.revisionCount,
+    requirementCoverage: cov,
     checks: [
-      { label: "Issue requirements covered", status: result.requirementsCovered ? "passed" : "warning" },
+      { label: "Issue requirements covered", status: (result.requirementsCovered && !anyReqFailed) ? "passed" : "warning" },
       { label: "Only relevant files modified", status: !result.unrelatedChanges ? "passed" : "warning" },
       { label: "Existing API appears preserved", status: !result.apiBreakageRisk ? "passed" : "warning" },
-      { label: "Repository code and tests were not executed", status: "warning" }
-    ]
+      { label: "Repository code and tests were not executed", status: "warning" },
+    ],
   };
 
   const currentVersion = state.patchVersions[state.patchVersions.length - 1];
@@ -435,6 +687,7 @@ function runFor(state: AgentRunState, elapsed: number, status: PilotRun["status"
     revisedPatch: state.revisedPatch,
     finalPatch: status === "completed" ? currentPatch : state.finalPatch,
     patchVersions: state.patchVersions,
+    requirements: state.requirements,
   };
 }
 
@@ -446,7 +699,8 @@ function refuse(
   emit: (event: RunEvent) => void,
   kind: "out_of_scope" | "budget_exhausted" | "insufficient_evidence" | "planning_failed" | "patch_generation_failed" = "insufficient_evidence",
   stageId?: StageId,
-  title?: string
+  title?: string,
+  customCode?: string
 ) {
   const resolvedTitle =
     title ??
@@ -468,7 +722,7 @@ function refuse(
       : kind === "planning_failed"
       ? "Planning stopped because the proposed changes could not be mapped to verified inspected files."
       : kind === "patch_generation_failed"
-      ? "Patch generation failed to produce a valid, reviewable diff."
+      ? `Patch generation failed: ${reason}`
       : state.review
       ? "Codex Pilot proposed a patch, but the reviewer identified unresolved concerns."
       : "Codex Pilot stopped because the inspected evidence was not strong enough for a trustworthy patch.";
@@ -494,7 +748,8 @@ function refuse(
   }
 
   const code =
-    kind === "budget_exhausted"
+    customCode ??
+    (kind === "budget_exhausted"
       ? "BUDGET_EXHAUSTED"
       : kind === "out_of_scope"
       ? `OUT_OF_SCOPE_${state.evidence?.requiredCapability?.toUpperCase()}`
@@ -504,7 +759,7 @@ function refuse(
       ? "PATCH_GENERATION_FAILED"
       : state.review
       ? "PATCH_REVIEW_FAILED"
-      : "NO_IMPLEMENTATION_FOUND";
+      : "NO_IMPLEMENTATION_FOUND");
 
   emit({
     type: "completed",
@@ -532,6 +787,16 @@ export async function streamPilotRun(issueUrl: string, emit: (event: RunEvent) =
     const { encoded } = await understandIssue(state, issueUrl, client, emit, tools);
     state.analysis = await responseJson<IssueAnalysis>(codex, "Classify this GitHub issue and extract expected versus observed behavior, exact symbols, paths, errors, evidence surfaces, reproduction details, approaches and constraints. OWNER, MEMBER and COLLABORATOR comments are maintainer clarifications; other comments are unverified proposals. Do not invent facts, paths, or maintainer statements. Use empty arrays for absent information.", compactIssue(state), analysisSchema);
     tools.activity("understanding", "Classified issue", state.analysis.kinds.join(", ") + ": " + state.analysis.summary);
+
+    // Extract structured requirements contract
+    state.requirements = extractStructuredRequirements(state.analysis, state.issueData?.title, state.issueData?.body || "");
+    emit({ type: "requirements", requirements: state.requirements });
+    tools.activity(
+      "understanding",
+      "Structured requirements contract",
+      `Extracted ${state.requirements.length} requirements (${state.requirements.filter((r) => r.type === "mustImplement").length} implement, ${state.requirements.filter((r) => r.type === "mustPreserve").length} preserve, ${state.requirements.filter((r) => r.type === "mustTest").length} test).`
+    );
+
     await scanRepository(state, encoded, client, tools);
     const exploration = await exploreRepository(state, encoded, client, codex, tools, emit);
     if (exploration.decision !== "ready_to_patch") {
@@ -560,7 +825,56 @@ export async function streamPilotRun(issueUrl: string, emit: (event: RunEvent) =
         "Patch generation failed"
       );
     }
-    let verdict = await reviewPatch(state, codex, tools);
+
+    // Deterministic static sanity gate before reviewer
+    let staticCheck = validatePatchStatic(state.files, state);
+    if (!staticCheck.ok) {
+      tools.activity("writing", "Static gate check", staticCheck.reason, "warning");
+      if (state.revisionCount < MAX_REVISION_ROUNDS) {
+        state.revisionCount = 1;
+        tools.stage("revising", "investigating");
+        tools.activity("revising", "Repairing static gate failure", staticCheck.reason);
+        const revision = await generatePatch(
+          state,
+          codex,
+          tools,
+          emit,
+          `STATIC SANITY GATE FAILED (${staticCheck.code}): ${staticCheck.reason}. You must fix this violation in your revision.`
+        );
+        if (!revision.ok) {
+          return refuse(
+            state,
+            revision.reason!,
+            "Inspect additional source files or refine the issue requirements.",
+            tools,
+            emit,
+            "patch_generation_failed",
+            "revising",
+            "Patch generation failed",
+            staticCheck.code
+          );
+        }
+        tools.stage("revising", "completed");
+        staticCheck = validatePatchStatic(state.files, state);
+      }
+
+      if (!staticCheck.ok) {
+        tools.stage("writing", "failed");
+        return refuse(
+          state,
+          staticCheck.reason,
+          "Resolve the static check violation before requesting patch review.",
+          tools,
+          emit,
+          "patch_generation_failed",
+          "writing",
+          "Static sanity check failed",
+          staticCheck.code
+        );
+      }
+    }
+
+    let verdict = await reviewPatch(state, codex, tools, emit);
     if (verdict === "revise") {
       state.revisionCount = 1;
       tools.activity("reviewing", "Revision requested", state.review?.feedback?.join(" ") || "Reviewer found a focused concern.", "warning");
@@ -580,8 +894,26 @@ export async function streamPilotRun(issueUrl: string, emit: (event: RunEvent) =
           "Patch generation failed"
         );
       }
+
+      // Re-run static gate on revision
+      const staticCheckRev = validatePatchStatic(state.files, state);
+      if (!staticCheckRev.ok) {
+        tools.stage("revising", "failed");
+        return refuse(
+          state,
+          staticCheckRev.reason,
+          "Resolve the static check violation before requesting patch review.",
+          tools,
+          emit,
+          "patch_generation_failed",
+          "revising",
+          "Static sanity check failed",
+          staticCheckRev.code
+        );
+      }
+
       tools.stage("revising", "completed");
-      verdict = await reviewPatch(state, codex, tools);
+      verdict = await reviewPatch(state, codex, tools, emit);
     }
     if (verdict !== "approve") {
       tools.stage("reviewing", "failed");
@@ -615,7 +947,7 @@ export async function streamPilotRun(issueUrl: string, emit: (event: RunEvent) =
       ...(state.issue && state.repository
         ? {
             run: runFor(state, tools.elapsed(), "refused", {
-              kind: diagnostic.code === "PLAN_SCOPE_INVALID" ? "planning_failed" : "insufficient_evidence",
+              kind: (diagnostic.code === "PLAN_SCOPE_INVALID" || diagnostic.code === "SOURCE_CHANGE_REQUIRED") ? "planning_failed" : "insufficient_evidence",
               title: diagnostic.title,
               code: diagnostic.code,
               reason: diagnostic.message,

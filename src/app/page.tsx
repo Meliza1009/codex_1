@@ -59,9 +59,17 @@ const sample: PilotRun = {
     { id: "3", title: "Restore persisted preference", detail: "Apply the restored theme after browser hydration.", status: "completed" },
     { id: "4", title: "Preserve external API", detail: "No calling-code changes required.", status: "completed" },
   ],
+  requirements: [
+    { id: "R1", type: "mustImplement", text: "Restore theme preference from localStorage on mount", status: "implemented", coveredByFiles: ["src/hooks/useTheme.ts"], reviewVerdict: "pass" },
+    { id: "R2", type: "mustImplement", text: "Apply restored theme to document dataset and colorScheme", status: "implemented", coveredByFiles: ["src/providers/ThemeProvider.tsx"], reviewVerdict: "pass" },
+    { id: "R3", type: "mustPreserve", text: "Preserve useTheme API and SSR safety", status: "preserved", coveredByFiles: ["src/hooks/useTheme.ts"], reviewVerdict: "pass" },
+    { id: "R4", type: "mustTest", text: "Verify theme persistence across client reloads", status: "tested", reviewVerdict: "pass" },
+  ],
   files: [
     {
       path: "src/hooks/useTheme.ts",
+      role: "source",
+      requirementsCovered: ["R1", "R3"],
       additions: 14,
       deletions: 3,
       reason: "Initializes from browser storage and writes changes back to storage.",
@@ -69,6 +77,8 @@ const sample: PilotRun = {
     },
     {
       path: "src/providers/ThemeProvider.tsx",
+      role: "source",
+      requirementsCovered: ["R2"],
       additions: 7,
       deletions: 1,
       reason: "Applies the restored value after hydration.",
@@ -113,6 +123,8 @@ const sample: PilotRun = {
       files: [
         {
           path: "src/hooks/useTheme.ts",
+          role: "source",
+          requirementsCovered: ["R1", "R3"],
           additions: 14,
           deletions: 3,
           reason: "Initializes from browser storage and writes changes back to storage.",
@@ -120,6 +132,8 @@ const sample: PilotRun = {
         },
         {
           path: "src/providers/ThemeProvider.tsx",
+          role: "source",
+          requirementsCovered: ["R2"],
           additions: 7,
           deletions: 1,
           reason: "Applies the restored value after hydration.",
@@ -200,6 +214,7 @@ function liveShell(issue: PilotRun["issue"], repository: PilotRun["repository"])
     metrics: { elapsedMs: 0, filesIndexed: 0, filesInspected: 0, searches: 0, explorationRounds: 0, revisions: 0, filesChanged: 0, additions: 0, deletions: 0 },
     patch: "",
     patchVersions: [],
+    requirements: [],
   };
 }
 
@@ -225,7 +240,7 @@ function numberedDiff(diff: string) {
 export default function Home() {
   const [url, setUrl] = useState("");
   const [run, setRun] = useState<Partial<PilotRun> | null>(null);
-  const [tab, setTab] = useState<"diff" | "plan" | "explanation" | "review" | "verification">("diff");
+  const [tab, setTab] = useState<"diff" | "requirements" | "plan" | "explanation" | "review" | "verification">("diff");
   const [selectedVersion, setSelectedVersion] = useState<number | undefined>(undefined);
   const [fileIndex, setFileIndex] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -275,6 +290,7 @@ export default function Home() {
       if (event.type === "search") return { ...previous, searches: [...(previous.searches || []), event.search] };
       if (event.type === "inspection") return { ...previous, inspectedFiles: [...(previous.inspectedFiles || []).filter((file) => file.path !== event.inspection.path), event.inspection] };
       if (event.type === "evidence") return { ...previous, evidence: event.evidence };
+      if (event.type === "requirements") return { ...previous, requirements: event.requirements };
       if (event.type === "plan") return { ...previous, plan: event.plan };
       if (event.type === "verification") return { ...previous, verification: event.verification };
       return previous;
@@ -648,7 +664,7 @@ export default function Home() {
             />
 
             <div className="flex flex-wrap gap-5 border-b border-[#30363d] px-4">
-              {(["diff", "plan", "explanation", "review", "verification"] as const).map((name) => (
+              {(["diff", "requirements", "plan", "explanation", "review", "verification"] as const).map((name) => (
                 <button
                   key={name}
                   onClick={() => setTab(name)}
@@ -659,6 +675,16 @@ export default function Home() {
                 >
                   {name === "verification" ? "Patch verification" : name}
                   {name === "diff" && <span className="ml-1.5 font-mono text-xs text-[#8b949e]">{active.files.length}</span>}
+                  {name === "requirements" && (
+                    <span className="ml-1.5 font-mono text-xs text-[#8b949e]">{active.requirements?.length || 0}</span>
+                  )}
+                  {name === "requirements" && (
+                    active.requirements?.some((r) => r.status === "failed") ? (
+                      <span className="ml-1 text-[#f85149] font-bold">✗</span>
+                    ) : active.requirements?.length && active.requirements.every((r) => r.status === "implemented" || r.status === "tested" || r.status === "preserved") ? (
+                      <span className="ml-1 text-[#3fb950] font-bold">✓</span>
+                    ) : null
+                  )}
                   {name === "review" && (
                     active.review?.verdict === "approved" || (active.review?.status === "passed" && active.status === "completed") ? (
                       <span className="ml-1 text-[#3fb950] font-bold">✓</span>
@@ -685,6 +711,7 @@ export default function Home() {
                 setSelectedVersion={setSelectedVersion}
               />
             )}
+            {tab === "requirements" && <RequirementsPanel run={active} />}
             {tab === "plan" && <Plan run={active} />}
             {tab === "explanation" && <Explanation run={active} />}
             {tab === "review" && <ReviewPanel run={active} />}
@@ -1046,17 +1073,52 @@ function Diff({
             onClick={() => setIndex(fileIndex)}
             className={
               ((files[index] ? index === fileIndex : fileIndex === 0) ? "border-b-2 border-[#f78166] bg-[#161b22] text-white" : "border-b-2 border-transparent text-[#8b949e]") +
-              " -mb-px shrink-0 px-3 py-3 font-mono text-xs"
+              " -mb-px shrink-0 px-3 py-3 font-mono text-xs flex items-center gap-1.5"
             }
           >
-            {change.path.split("/").pop()} <span className="ml-1 text-[#3fb950]">+{change.additions}</span>
+            {change.role && (
+              <span
+                className={`rounded px-1.5 py-0.5 text-[9px] font-sans font-semibold uppercase tracking-wider ${
+                  change.role === "source"
+                    ? "bg-[#1f6feb]/20 text-[#58a6ff] border border-[#1f6feb]/40"
+                    : change.role === "test"
+                    ? "bg-[#a371f7]/20 text-[#bc8cff] border border-[#a371f7]/40"
+                    : change.role === "docs"
+                    ? "bg-[#d29922]/20 text-[#e3b341] border border-[#d29922]/40"
+                    : "bg-[#30363d] text-[#8b949e]"
+                }`}
+              >
+                {change.role}
+              </span>
+            )}
+            <span>{change.path.split("/").pop()}</span>
+            <span className="ml-1 text-[#3fb950]">+{change.additions}</span>
             <span className="ml-1 text-[#f85149]">−{change.deletions}</span>
           </button>
         ))}
       </div>
-      <div className="border-b border-[#30363d] px-4 py-3">
-        <p className="font-mono text-xs text-[#58a6ff]">{file.path}</p>
-        <p className="mt-1 text-xs text-[#8b949e]">{file.reason}</p>
+      <div className="border-b border-[#30363d] px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+        <div>
+          <div className="flex items-center gap-2">
+            <p className="font-mono text-xs text-[#58a6ff]">{file.path}</p>
+            {file.role && (
+              <span className="rounded bg-[#161b22] border border-[#30363d] px-2 py-0.5 text-[10px] font-mono text-[#8b949e]">
+                role: {file.role}
+              </span>
+            )}
+          </div>
+          <p className="mt-1 text-xs text-[#8b949e]">{file.reason}</p>
+        </div>
+        {file.requirementsCovered && file.requirementsCovered.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] font-mono uppercase text-[#8b949e]">Covers:</span>
+            {file.requirementsCovered.map((reqId) => (
+              <span key={reqId} className="rounded border border-[#238636]/40 bg-[#238636]/20 px-1.5 py-0.5 font-mono text-[10px] text-[#3fb950]">
+                {reqId}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
       <div className="max-h-[560px] overflow-auto bg-[#0d1117] p-3 font-mono text-xs leading-5">
         {numberedDiff(file.diff).map((line) => (
@@ -1225,6 +1287,42 @@ function ReviewPanel({ run }: { run: PilotRun }) {
         </div>
       )}
 
+      {run.requirements && run.requirements.length > 0 && (
+        <div className="space-y-2">
+          <h4 className="font-mono text-[10px] uppercase tracking-[.12em] text-[#8b949e]">
+            Requirements Verification Coverage
+          </h4>
+          <div className="divide-y divide-[#30363d] rounded-md border border-[#30363d] bg-[#0d1117]">
+            {run.requirements.map((req) => {
+              const isPassed = req.reviewVerdict === "pass" || req.status === "implemented" || req.status === "tested" || req.status === "preserved";
+              return (
+                <div key={req.id} className="flex items-center justify-between p-3 text-xs">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className={`h-2.5 w-2.5 rounded-full shrink-0 ${isPassed ? "bg-[#3fb950]" : "bg-[#f85149]"}`} />
+                    <span className="font-mono font-semibold text-[#58a6ff]">{req.id}</span>
+                    <span className="truncate text-white">{req.text}</span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className={`font-mono text-[10px] uppercase tracking-[.1em] ${isPassed ? "text-[#aff5b4]" : "text-[#ffdcd7]"}`}>
+                      {req.reviewVerdict || (isPassed ? "pass" : "fail")}
+                    </span>
+                    <span className={`rounded-full px-2 py-0.5 font-mono text-[10px] ${
+                      req.status === "implemented" ? "bg-[#238636]/20 text-[#3fb950] border border-[#238636]/40" :
+                      req.status === "tested" ? "bg-[#1f6feb]/20 text-[#58a6ff] border border-[#1f6feb]/40" :
+                      req.status === "preserved" ? "bg-[#a371f7]/20 text-[#bc8cff] border border-[#a371f7]/40" :
+                      req.status === "failed" ? "bg-[#da3633]/20 text-[#f85149] border border-[#da3633]/40" :
+                      "bg-[#30363d] text-[#8b949e]"
+                    }`}>
+                      {req.status}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {run.patchVersions && run.patchVersions.length > 0 && (
         <div className="space-y-2">
           <h4 className="font-mono text-[10px] uppercase tracking-[.12em] text-[#8b949e]">
@@ -1252,6 +1350,145 @@ function ReviewPanel({ run }: { run: PilotRun }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function RequirementsPanel({ run }: { run: PilotRun }) {
+  const reqs = run.requirements || [];
+
+  if (!reqs.length) {
+    return (
+      <div className="p-6 text-center text-sm text-[#8b949e]">
+        No requirements contract was generated for this issue.
+      </div>
+    );
+  }
+
+  const implementedCount = reqs.filter((r) => r.status === "implemented").length;
+  const testedCount = reqs.filter((r) => r.status === "tested").length;
+  const preservedCount = reqs.filter((r) => r.status === "preserved").length;
+  const failedCount = reqs.filter((r) => r.status === "failed").length;
+  const plannedCount = reqs.filter((r) => r.status === "planned").length;
+
+  return (
+    <div className="p-5 space-y-6">
+      {/* Header card with metrics */}
+      <div className="rounded-md border border-[#30363d] bg-[#0d1117] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h3 className="text-sm font-semibold text-white">Structured Requirements Contract</h3>
+          <p className="mt-1 text-xs text-[#8b949e]">
+            Deterministic mechanical mapping proving every issue requirement is covered by concrete code or tests.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full border border-[#238636]/40 bg-[#238636]/10 px-2.5 py-1 font-mono text-[11px] text-[#aff5b4]">
+            {implementedCount} implemented
+          </span>
+          <span className="rounded-full border border-[#1f6feb]/40 bg-[#1f6feb]/10 px-2.5 py-1 font-mono text-[11px] text-[#79c0ff]">
+            {testedCount} tested
+          </span>
+          <span className="rounded-full border border-[#a371f7]/40 bg-[#a371f7]/10 px-2.5 py-1 font-mono text-[11px] text-[#bc8cff]">
+            {preservedCount} preserved
+          </span>
+          {failedCount > 0 && (
+            <span className="rounded-full border border-[#da3633]/40 bg-[#da3633]/10 px-2.5 py-1 font-mono text-[11px] text-[#ffdcd7]">
+              {failedCount} failed
+            </span>
+          )}
+          {plannedCount > 0 && (
+            <span className="rounded-full border border-[#d29922]/40 bg-[#d29922]/10 px-2.5 py-1 font-mono text-[11px] text-[#e3b341]">
+              {plannedCount} planned
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Requirements checklist */}
+      <div className="divide-y divide-[#30363d] rounded-md border border-[#30363d] bg-[#0d1117]">
+        {reqs.map((req) => {
+          const isPassed = req.status === "implemented" || req.status === "tested" || req.status === "preserved";
+          const isFailed = req.status === "failed";
+          const isPlanned = req.status === "planned";
+
+          return (
+            <div key={req.id} className="p-4 space-y-2">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-3">
+                  <span
+                    className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full text-xs font-bold ${
+                      isPassed
+                        ? "bg-[#238636]/20 text-[#3fb950] border border-[#238636]/40"
+                        : isFailed
+                        ? "bg-[#da3633]/20 text-[#f85149] border border-[#da3633]/40"
+                        : isPlanned
+                        ? "bg-[#d29922]/20 text-[#e3b341] border border-[#d29922]/40"
+                        : "bg-[#30363d] text-[#8b949e]"
+                    }`}
+                  >
+                    {isPassed ? "✓" : isFailed ? "✗" : isPlanned ? "○" : "?"}
+                  </span>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-mono text-xs font-semibold text-[#58a6ff]">{req.id}</span>
+                      <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                        req.type === "mustImplement" ? "bg-[#1f6feb]/20 text-[#79c0ff] border border-[#1f6feb]/40" :
+                        req.type === "mustPreserve" ? "bg-[#a371f7]/20 text-[#bc8cff] border border-[#a371f7]/40" :
+                        req.type === "mustTest" ? "bg-[#238636]/20 text-[#aff5b4] border border-[#238636]/40" :
+                        "bg-[#30363d] text-[#8b949e]"
+                      }`}>
+                        {req.type}
+                      </span>
+                      <span className="text-sm font-medium text-white">{req.text}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Status Pill */}
+                <div className="shrink-0">
+                  <span
+                    className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 font-mono text-[11px] capitalize ${
+                      req.status === "implemented"
+                        ? "border-[#238636]/40 bg-[#238636]/20 text-[#3fb950]"
+                        : req.status === "tested"
+                        ? "border-[#1f6feb]/40 bg-[#1f6feb]/20 text-[#58a6ff]"
+                        : req.status === "preserved"
+                        ? "border-[#a371f7]/40 bg-[#a371f7]/20 text-[#bc8cff]"
+                        : req.status === "failed"
+                        ? "border-[#da3633]/40 bg-[#da3633]/20 text-[#f85149]"
+                        : req.status === "planned"
+                        ? "border-[#d29922]/40 bg-[#d29922]/20 text-[#e3b341]"
+                        : "border-[#30363d] bg-[#161b22] text-[#8b949e]"
+                    }`}
+                  >
+                    {isPassed ? "✓ " : isFailed ? "✗ " : ""}
+                    {req.status}
+                  </span>
+                </div>
+              </div>
+
+              {/* Covered by files */}
+              {req.coveredByFiles && req.coveredByFiles.length > 0 && (
+                <div className="ml-8 flex flex-wrap items-center gap-2 pt-1">
+                  <span className="text-[11px] text-[#8b949e]">Covered by:</span>
+                  {req.coveredByFiles.map((path) => (
+                    <span key={path} className="rounded bg-[#161b22] border border-[#30363d] px-2 py-0.5 font-mono text-[11px] text-[#c9d1d9]">
+                      {path}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {/* Detail or Failure Reason */}
+              {req.detail && (
+                <div className="ml-8 rounded bg-[#161b22] border border-[#d29922]/30 p-2 text-xs text-[#e3b341]">
+                  {req.detail}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
