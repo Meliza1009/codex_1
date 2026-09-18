@@ -144,9 +144,9 @@ export function classifyFileRole(path: string): import("./pilot-types").FileRole
   return "source";
 }
 
-export function isImplementationIssue(analysis?: IssueAnalysis): boolean {
+export function isImplementationIssue(analysis?: Partial<IssueAnalysis>): boolean {
   if (!analysis) return true;
-  return analysis.kinds.some((k) => k !== "documentation") || analysis.importantSymbols.length > 0;
+  return (analysis.kinds ?? []).some((k) => k !== "documentation") || (analysis.importantSymbols ?? []).length > 0;
 }
 
 export function extractStructuredRequirements(
@@ -200,9 +200,9 @@ export function extractStructuredRequirements(
       if (seen.has(norm)) continue;
       seen.add(norm);
       if (list.some((r) => r.text.toLowerCase().replace(/[`'".,]/g, "").trim() === norm)) continue;
-      const isTest = /test|spec|assert|coverage/i.test(bullet);
-      const isPreserve = /preserve|backward|compatibility|avoid mutating|without changing|existing/i.test(bullet);
-      const isDocs = /docs?|jsdoc|example|readme/i.test(bullet);
+      const isTest = /\b(tests?|specs?|assert(?:ion)?s?|coverage)\b/i.test(bullet);
+      const isPreserve = /\b(preserve[ds]?|preserving|backward|compatibility|avoid mutating|without changing|existing)\b/i.test(bullet);
+      const isDocs = /\b(docs?|jsdocs?|examples?|readme|documentation)\b/i.test(bullet);
       const type: import("./pilot-types").RequirementType = isTest ? "mustTest" : isPreserve ? "mustPreserve" : isDocs ? "optionalDocs" : "mustImplement";
       list.push({
         id: nextId(),
