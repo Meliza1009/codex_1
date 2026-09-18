@@ -1,4 +1,4 @@
-export type StageId = "understanding" | "exploring" | "planning" | "writing" | "reviewing";
+export type StageId = "understanding" | "exploring" | "evidence" | "planning" | "writing" | "reviewing" | "revising";
 export type StepStatus = "pending" | "investigating" | "completed" | "warning";
 
 export type Stage = { id: StageId; label: string; status: StepStatus; elapsedMs?: number };
@@ -8,14 +8,16 @@ export type InspectedFile = { path: string; reason: string; finding: string; lin
 export type PlanStep = { id: string; title: string; detail: string; paths?: string[]; status: StepStatus };
 export type FileChange = { path: string; additions: number; deletions: number; diff: string; reason: string };
 export type FileExplanation = { path: string; explanation: string; coverage: string[] };
-export type Review = { status: "passed" | "warning"; verdict?: "approved" | "refused"; feedback?: string; revisionCount?: number; checks: { label: string; status: "passed" | "warning" }[] };
+export type EvidenceFile = { path: string; relevance: string; findings: string[] };
+export type EvidenceReport = { enoughEvidence: boolean; confidence: number; reason: string; evidence: EvidenceFile[]; additionalSearches: string[] };
+export type Review = { status: "passed" | "warning"; verdict?: "approved" | "refused"; requirementsCovered?: boolean; unrelatedChanges?: boolean; likelySyntaxProblems?: boolean; apiBreakageRisk?: boolean; evidenceSupported?: boolean; feedback?: string[]; revisionCount?: number; checks: { label: string; status: "passed" | "warning" }[] };
 export type RunError = { code: string; title: string; message: string; retryable?: boolean };
 
 export type PilotRun = {
   issue: { number: number; title: string; repository: string; url: string };
   repository: { branch: string; language: string; public: true; url: string };
   source: "live" | "sample";
-  status: "completed" | "needs-review";
+  status: "completed" | "needs-review" | "refused";
   summary: string;
   stages: Stage[];
   activity: Activity[];
@@ -26,9 +28,10 @@ export type PilotRun = {
   explanations: FileExplanation[];
   review: Review;
   confidence: "high" | "medium" | "low";
-  investigation?: { sufficient: boolean; rationale: string; selectedPaths: string[] };
+  evidence?: EvidenceReport;
+  refusal?: { reason: string; suggestedNextStep: string };
   limitations: string[];
-  metrics: { elapsedMs: number; filesIndexed: number; filesInspected: number; searches: number; filesChanged: number; additions: number; deletions: number };
+  metrics: { elapsedMs: number; filesIndexed: number; filesInspected: number; searches: number; explorationRounds: number; revisions: number; filesChanged: number; additions: number; deletions: number };
   patch: string;
 };
 
@@ -38,6 +41,7 @@ export type RunEvent =
   | { type: "activity"; activity: Activity }
   | { type: "search"; search: Search }
   | { type: "inspection"; inspection: InspectedFile }
+  | { type: "evidence"; evidence: EvidenceReport }
   | { type: "plan"; plan: PlanStep[] }
   | { type: "completed"; run: PilotRun }
   | { type: "failed"; error: RunError };
