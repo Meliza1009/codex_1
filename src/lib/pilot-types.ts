@@ -1,5 +1,39 @@
-export type StageId = "understanding" | "exploring" | "evidence" | "planning" | "writing" | "reviewing" | "revising";
+export type StageId = "understanding" | "exploring" | "evidence" | "planning" | "writing" | "reviewing" | "revising" | "verifying";
 export type StepStatus = "pending" | "investigating" | "completed" | "warning";
+
+export type VerificationResult =
+  | "verified"
+  | "patch_applies_but_unverified"
+  | "tests_failed"
+  | "build_failed"
+  | "patch_failed"
+  | "verification_unavailable";
+
+export type VerificationStage = {
+  id: "workspace" | "patch" | "detect" | "build" | "test" | "issue";
+  name: string;
+  status: "pending" | "running" | "passed" | "failed" | "skipped";
+  detail?: string;
+  output?: string;
+  durationMs?: number;
+};
+
+export type VerificationReport = {
+  result: VerificationResult;
+  verdictLabel: "VERIFIED FIX" | "PATCH PROPOSED — NOT VERIFIED" | "PATCH FAILED VERIFICATION";
+  workspace?: string;
+  stages: VerificationStage[];
+  commandsDetected?: {
+    install?: string;
+    build?: string;
+    test?: string;
+    lint?: string;
+  };
+  issueVerificationDetail?: string;
+  summary: string;
+  durationMs: number;
+  error?: string;
+};
 
 export type Stage = { id: StageId; label: string; status: "pending" | "active" | "complete" | "skipped" | "failed"; elapsedMs?: number };
 export type Activity = { id: string; stage: StageId; action: string; detail: string; elapsedMs: number; status: "completed" | "warning" };
@@ -34,6 +68,7 @@ export type PilotRun = {
   limitations: string[];
   metrics: { elapsedMs: number; filesIndexed: number; filesInspected: number; searches: number; explorationRounds: number; revisions: number; filesChanged: number; additions: number; deletions: number };
   patch: string;
+  verification?: VerificationReport;
 };
 
 export type RunEvent =
@@ -44,5 +79,6 @@ export type RunEvent =
   | { type: "inspection"; inspection: InspectedFile }
   | { type: "evidence"; evidence: EvidenceReport }
   | { type: "plan"; plan: PlanStep[] }
+  | { type: "verification"; verification: VerificationReport }
   | { type: "completed"; run: PilotRun }
   | { type: "failed"; error: RunError; run?: PilotRun };

@@ -11,7 +11,13 @@ function load(name) {
   const local = new Module(filename, module);
   local.filename = filename;
   local.paths = module.paths;
-  local.require = (request) => request === './investigation' ? load('investigation') : require(request);
+  local.require = (request) => {
+    if (request.startsWith('./')) {
+      const target = request.slice(2).replace(/\.ts$/, '');
+      return load(target);
+    }
+    return require(request);
+  };
   local._compile(compiled, filename);
   return local.exports;
 }

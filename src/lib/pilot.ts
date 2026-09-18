@@ -65,7 +65,7 @@ const MAX_CHANGED_FILES = 6;
 const MAX_CONTEXT_CHARS = 120_000;
 const MAX_REVISION_ROUNDS = 1;
 const IGNORED_PATH = /(^|\/)(node_modules|dist|build|\.next|coverage|vendor|generated|\.git)(\/|$)|(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$|\.min\.[cm]?[jt]s$|\.(png|jpe?g|gif|svg|ico|pdf|zip|gz|woff2?|map)$/i;
-const stageLabels: Record<StageId, string> = { understanding: "Understanding issue", exploring: "Exploring repository", evidence: "Evidence gate", planning: "Planning", writing: "Generating patch", reviewing: "Reviewing patch", revising: "Revising patch" };
+const stageLabels: Record<StageId, string> = { understanding: "Understanding issue", exploring: "Exploring repository", evidence: "Evidence gate", planning: "Planning", writing: "Generating patch", reviewing: "Reviewing patch", revising: "Revising patch", verifying: "Verifying patch" };
 
 function headers() { const token = process.env.GITHUB_TOKEN; return { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "codex-pilot", ...(token ? { Authorization: `Bearer ${token}` } : {}) }; }
 function fail(code: string, title: string, message: string, retryable = false): never { throw { code, title, message, retryable } satisfies RunError; }
